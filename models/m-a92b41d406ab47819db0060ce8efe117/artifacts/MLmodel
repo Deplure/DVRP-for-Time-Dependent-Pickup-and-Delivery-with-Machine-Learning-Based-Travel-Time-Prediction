@@ -1,0 +1,22 @@
+artifact_path: file:E:/File TA Dicky Eka Putra/mlruns/1/models/m-a92b41d406ab47819db0060ce8efe117/artifacts
+flavors:
+  python_function:
+    data: model.ubj
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.xgboost
+    python_version: 3.14.3
+  xgboost:
+    code: null
+    data: model.ubj
+    model_class: xgboost.sklearn.XGBRegressor
+    model_format: ubj
+    xgb_version: 3.1.3
+mlflow_version: 3.9.0
+model_id: m-a92b41d406ab47819db0060ce8efe117
+model_size_bytes: 411243
+model_uuid: m-a92b41d406ab47819db0060ce8efe117
+prompts: null
+run_id: 469e6b47059447dbb44b7d5b666d8278
+utc_time_created: '2026-02-04 09:41:57.917964'

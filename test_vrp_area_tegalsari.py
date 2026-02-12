@@ -60,7 +60,7 @@ for i in range(num_samples):
         'distance_meters': jarak_meter,
         'duration_normal_sec': waktu_normal_sec,
         'hour': jam,
-        'day_of_week': 4, # Anggap Jumat (Hari Sibuk)
+        'day_of_week': 3, # Anggap Jumat (Hari Sibuk)
         'is_rain': hujan
     })
 

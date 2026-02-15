@@ -6,95 +6,122 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 from sklearn.preprocessing import LabelEncoder
 import os
+import time
 
 # ================= KONFIGURASI =================
 FILENAME = 'dataset_kemacetan_tegalsari_final.csv'
-EXPERIMENT_NAME = "Skripsi_VRP_Tegalsari"
+EXPERIMENT_NAME = "Skripsi_VRP_Tegalsari_GPU"
 
 def train_model():
+    print("="*50)
+    print("   TRAIN MODEL XGBOOST WITH NVIDIA CUDA (GPU)   ")
+    print("="*50)
+
     # 1. Cek Data
     if not os.path.exists(FILENAME):
-        print("❌ File data belum ada!")
+        print("[ERROR] File data CSV belum ditemukan!")
         return
 
-    print("Loading data...")
+    print("[INFO] Loading data...")
     try:
         df = pd.read_csv(FILENAME)
     except Exception as e:
-        print(f"❌ Gagal baca CSV: {e}")
+        print(f"[ERROR] Gagal membaca CSV: {e}")
         return
     
-    # Cek jumlah data (Safety)
-    if len(df) < 5:
-        print(f"⚠️ Data terlalu sedikit ({len(df)}). Coba lagi nanti.")
+    # Hapus baris yang kosong/error
+    df = df.dropna()
+    
+    if len(df) < 10:
+        print(f"[WARNING] Data terlalu sedikit ({len(df)}). Tunggu harvesting berjalan lagi.")
         return 
-    
-    print(f"📊 Total Data: {len(df)} baris")
 
-    # ================= 2. PREPROCESSING =================
-    features = ['origin_lat', 'origin_lng', 'dest_lat', 'dest_lng', 'distance_meters', 'hour_of_day']
-    target = 'duration_in_traffic_sec'
+    print(f"[INFO] Total Data Bersih: {len(df)} baris")
 
-    # Handle Cuaca (Jika nanti ada)
-    if 'weather_main' in df.columns:
-        print("ℹ️ Info: Kolom cuaca terdeteksi (tapi belum dipakai di training ini).")
+    # ================= 2. FEATURE ENGINEERING =================
     
-    # Encoding Hari
+    # A. Fitur Hujan (1/0)
+    condition_rain = df['weather_main'].isin(['Rain', 'Drizzle', 'Thunderstorm'])
+    df['is_rain'] = condition_rain.astype(int)
+    
+    # B. Encoding Hari
     le = LabelEncoder()
     df['day_code'] = le.fit_transform(df['day_of_week'])
-    features.append('day_code') 
+
+    # C. Fitur & Target
+    features = [
+        'origin_lat', 'origin_lng',
+        'dest_lat', 'dest_lng',
+        'distance_meters',
+        'duration_normal_sec',
+        'hour_of_day',
+        'day_code',
+        'is_rain'
+    ]
+    
+    target = 'duration_in_traffic_sec'
 
     X = df[features]
     y = df[target]
 
     # Split Data
-    try:
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    except ValueError:
-        X_train, X_test, y_train, y_test = X, X, y, y
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    # ================= 3. MLFLOW TRACKING =================
+    # ================= 3. TRAINING DENGAN CUDA (GPU) =================
     mlflow.set_experiment(EXPERIMENT_NAME)
 
     with mlflow.start_run():
-        print("🚀 Memulai Training...")
+        print("\n[INFO] Memulai Training di GPU (NVIDIA)...")
+        start_time = time.time()
         
+        # --- KONFIGURASI GPU ---
         params = {
             "objective": "reg:squarederror",
-            "n_estimators": 100,
-            "learning_rate": 0.1,
-            "max_depth": 6
+            "n_estimators": 1000,
+            "learning_rate": 0.02,
+            "max_depth": 8,
+            "subsample": 0.8,
+            "colsample_bytree": 0.8,
+            
+            # --- SETTING CUDA (GPU) ---
+            "device": "cuda",
+            "tree_method": "hist",
         }
         
+        # Inisialisasi Model
         model = xgb.XGBRegressor(**params)
+        
+        # Proses Training (Fitting)
         model.fit(X_train, y_train)
         
-        # --- PERUBAHAN DISINI (HITUNG DUA-DUANYA) ---
+        duration = time.time() - start_time
+        print(f"[INFO] Training Selesai dalam {duration:.2f} detik!")
         
-        # 1. Prediksi ke Data Latihan (Buat cek hafalan)
+        # --- EVALUASI ---
         pred_train = model.predict(X_train)
-        # 2. Prediksi ke Data Ujian (Buat cek kepintaran asli)
         pred_test = model.predict(X_test)
         
-        # Hitung Error (RMSE) Manual
         rmse_train = mean_squared_error(y_train, pred_train) ** 0.5
         rmse_test = mean_squared_error(y_test, pred_test) ** 0.5
+        mae_test = mean_absolute_error(y_test, pred_test)
         
-        print(f"✅ Training Selesai!")
-        print(f"   📉 Train Loss (RMSE): {rmse_train:.2f}")
-        print(f"   📉 Test Loss  (RMSE): {rmse_test:.2f}")
+        print("-" * 35)
+        print(f"HASIL TRAINING (GPU POWERED):")
+        print(f"   Train RMSE : {rmse_train:.2f} detik")
+        print(f"   Test RMSE  : {rmse_test:.2f} detik")
+        print(f"   Test MAE   : {mae_test:.2f} detik")
+        print("-" * 35)
 
-        # LOGGING KE MLFLOW
+        # LOGGING MLFLOW
         mlflow.log_params(params)
-        mlflow.log_param("data_size", len(df))
+        mlflow.log_param("hardware", "GPU NVIDIA")
+        mlflow.log_metric("rmse_test", rmse_test)
+        mlflow.log_metric("training_time", duration)
         
-        # Simpan dua metrik terpisah
-        mlflow.log_metric("rmse_train", rmse_train)
-        mlflow.log_metric("rmse_test", rmse_test) # Ini yang paling penting
+        # Simpan Model (Perbaikan Warning 'artifact_path')
+        mlflow.xgboost.log_model(xgb_model=model, artifact_path="model_vrp_tegalsari_gpu")
         
-        mlflow.xgboost.log_model(model, "model_xgboost_v1")
-        
-        print("\n📝 Cek MLflow UI sekarang. Sudah ada Train vs Test.")
+        print("\n[INFO] Model tersimpan di MLflow (Versi GPU).")
 
 if __name__ == "__main__":
     train_model()

@@ -29,12 +29,30 @@ Proyek ini dibangun menggunakan:
 ## 📂 Struktur Folder
 
 ```text
-├── data/               # Dataset (mentah dan hasil proses) - *Tidak diupload ke Git*
-├── notebooks/          # Jupyter Notebooks untuk eksperimen awal
-├── src/                # Source code utama (harvesting, training, dll)
-├── mlruns/             # Log eksperimen MLflow (Local only - *Di-ignore di Git*)
-├── requirements.txt    # Daftar dependensi Python
-└── README.md           # Dokumentasi proyek ini
+/Thesis-VRP-System
+│
+├── /backend            <-- OTAK SISTEM (Python FastAPI)
+│   ├── main.py         <-- Pintu masuk API (Server & Endpoint)
+│   ├── vrp_engine.py   <-- Script AI VRP (Logic OR-Tools & XGBoost)
+│   ├── geocoder.py     <-- [BARU] Script "Smart Caching" (Nominatim + SQLite)
+│   ├── models.py       <-- Definisi Data (Pydantic Models)
+│   ├── database.db     <-- Database (Menyimpan Orderan & Cache Alamat)
+│   ├── .env            <-- Kunci API & Run ID MLflow
+│   └── requirements.txt <-- [PENTING] Daftar library (fastapi, ortools, dll)
+│
+├── /frontend           <-- WAJAH SISTEM (React.js)
+│   ├── public/
+│   ├── src/
+│   │   ├── components/ <-- [SARAN] Pecah komponen biar rapi
+│   │   │   ├── MapView.js    <-- Khusus Peta
+│   │   │   ├── OrderList.js  <-- Khusus Tabel Order
+│   │   │   └── StatsCard.js  <-- Khusus Angka Statistik
+│   │   ├── App.js      <-- Layout Utama
+│   │   ├── api.js      <-- Jembatan ke Backend
+│   │   └── index.css   <-- Styling (Tailwind/CSS)
+│   └── package.json
+│
+└── /docker-osrm        <-- MAP SERVER (Biarkan jalan sendiri)
 
 Dicky Eka Putra Mahasiswa Tingkat Akhir - ITS
 

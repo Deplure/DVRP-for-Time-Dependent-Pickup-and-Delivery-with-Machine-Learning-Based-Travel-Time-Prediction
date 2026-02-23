@@ -9,7 +9,7 @@ import os
 import time
 
 # ================= KONFIGURASI =================
-FILENAME = 'dataset_kemacetan_tegalsari_final.csv'
+FILENAME = 'dataset_vrp_augmented.csv'
 EXPERIMENT_NAME = "Skripsi_VRP_Tegalsari_GPU"
 
 def train_model():

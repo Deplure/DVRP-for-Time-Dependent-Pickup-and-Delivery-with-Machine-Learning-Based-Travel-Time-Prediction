@@ -18,10 +18,10 @@ RUN_ID = os.getenv("MLFLOW_RUN_ID")
 MODEL_PATH = f"runs:/{RUN_ID}/model_vrp_tegalsari_gpu"
 OSRM_URL = "http://localhost:5000"
 
-NUM_VEHICLES = 3           
-VEHICLE_CAPACITY = 15      
+NUM_VEHICLES = 5           
+VEHICLE_CAPACITY = 20      
 SHIFT_START_HOUR = 8       
-SERVICE_TIME_SEC = 300     
+SERVICE_TIME_SEC = 120     
 
 # UPDATE DATA DI FILE compare_vrp_approaches.py
 
@@ -45,20 +45,14 @@ SERVICE_TIME_SEC = 300
 # Memaksa Distance VRP masuk ke jalur SMA -> Rawon yang macet parah.
 
 nodes_data = [
-    # 0. DEPOT
+    # ================= 0-9: DATA LAMA (TERMASUK JEBAKAN) =================
     {'id': '0_Depot_JNE',       'lat': -7.265232, 'lon': 112.736966, 'demand': 0,  'tw': (0, 86400)}, 
 
-    # --- URUTAN JEBAKAN 1: SMA TRIMURTI (Deadline 16:30) ---
+    # --- URUTAN JEBAKAN 1 & 2 ---
     {'id': '5_SMA_Trimurti',    'lat': -7.271378, 'lon': 112.743125, 'demand': 2,  'tw': (0, 1800)}, 
-
-    # --- URUTAN JEBAKAN 2: RAWON SETAN (Deadline 16:45) ---
-    # Jarak dari SMA dekat (Distance VRP suka).
-    # Waktu tempuh dari SMA lama (23 menit).
-    # Deadline cuma selisih 15 menit dari SMA.
-    # Distance VRP PASTI TELAT disini.
     {'id': '7_Rawon_Setan',     'lat': -7.261884, 'lon': 112.739778, 'demand': 3,  'tw': (0, 1800)},
 
-    # --- FILLER (Bebas) ---
+    # --- FILLER LAMA ---
     {'id': '4_Siola_Mall',      'lat': -7.256426, 'lon': 112.736236, 'demand': 4,  'tw': (0, 900)},
     {'id': '1_TP_Tunjungan',    'lat': -7.262608, 'lon': 112.742352, 'demand': -3, 'tw': (0, 900)},
     {'id': '3_Pasar_Kembang',   'lat': -7.269480, 'lon': 112.730594, 'demand': -5, 'tw': (0, 900)},
@@ -66,6 +60,36 @@ nodes_data = [
     {'id': '2_Hotel_Majapahit', 'lat': -7.260656, 'lon': 112.738876, 'demand': -2, 'tw': (900, 1800)},
     {'id': '9_Gramedia',        'lat': -7.266857, 'lon': 112.742223, 'demand': -2, 'tw': (900, 1800)},
     {'id': '6_Patung_Sapi',     'lat': -7.263884, 'lon': 112.742308, 'demand': 1,  'tw': (900, 1800)},
+
+    # ================= 10-29: DATA BARU (AREA TEGALSARI) =================
+    
+    # KORIDOR KEDUNGDORO & SEKITARNYA
+    {'id': '10_SPBU_Kedungdoro',  'lat': -7.261012, 'lon': 112.732045, 'demand': -4, 'tw': (0, 900)},
+    {'id': '11_Apotek_K24',       'lat': -7.266050, 'lon': 112.731080, 'demand': 2,  'tw': (600, 1800)},
+    {'id': '12_Warkop_Pitlik',    'lat': -7.264020, 'lon': 112.735010, 'demand': -1, 'tw': (0, 1800)},
+    {'id': '13_Polsek_Tegalsari', 'lat': -7.267088, 'lon': 112.734000, 'demand': 3,  'tw': (0, 1800)},
+    {'id': '14_Sate_Klisik',      'lat': -7.271015, 'lon': 112.732090, 'demand': -3, 'tw': (900, 1800)},
+
+    # KORIDOR BASUKI RAHMAT & EMBONG MALANG
+    {'id': '15_KFC_Basra',        'lat': -7.265005, 'lon': 112.740510, 'demand': 4,  'tw': (900, 1800)},
+    {'id': '16_McD_Basra',        'lat': -7.263520, 'lon': 112.741080, 'demand': -2, 'tw': (0, 3600)},
+    {'id': '17_Kopi_Kenangan',    'lat': -7.262055, 'lon': 112.738010, 'demand': 2,  'tw': (1800, 3600)},
+    {'id': '18_Plaza_BRI',        'lat': -7.264510, 'lon': 112.742590, 'demand': -5, 'tw': (0, 3600)},
+    {'id': '19_Taman_Apsari',     'lat': -7.263080, 'lon': 112.744020, 'demand': 1,  'tw': (1800, 3600)},
+
+    # KORIDOR PANGLIMA SUDIRMAN & KEPUTRAN
+    {'id': '20_Monumen_Bambu',    'lat': -7.267812, 'lon': 112.743050, 'demand': -2, 'tw': (1800, 5400)},
+    {'id': '21_Intiland_Tower',   'lat': -7.268045, 'lon': 112.741010, 'demand': 5,  'tw': (0, 900)},
+    {'id': '22_Hotel_Bumi',       'lat': -7.269088, 'lon': 112.742050, 'demand': -4, 'tw': (0, 3600)},
+    {'id': '23_Gereja_Hati_Kudus','lat': -7.270510, 'lon': 112.741580, 'demand': 2,  'tw': (0, 2700)},
+    {'id': '24_Pasar_Keputran',   'lat': -7.273050, 'lon': 112.742010, 'demand': -5, 'tw': (0, 900)},
+
+    # KORIDOR DARMO & DINOYO (BATAS SELATAN TEGALSARI)
+    {'id': '25_BCA_Darmo',        'lat': -7.275520, 'lon': 112.740050, 'demand': 3,  'tw': (900, 1800)},
+    {'id': '26_RS_Darmo',         'lat': -7.280010, 'lon': 112.738090, 'demand': -3, 'tw': (0, 2700)},
+    {'id': '27_Kantor_Pos_Dinoyo','lat': -7.278055, 'lon': 112.739020, 'demand': 4,  'tw': (1800, 2700)},
+    {'id': '28_Pecel_Madiun',     'lat': -7.272045, 'lon': 112.735080, 'demand': -2, 'tw': (1800, 3600)},
+    {'id': '29_Indomaret_Pregolan','lat':-7.268510, 'lon': 112.737520, 'demand': 1,  'tw': (0, 1800)}
 ]
 
 # ================= 2. HELPERS =================
@@ -194,7 +218,10 @@ def solve_vrp_modular(cost_matrix, time_matrix_for_constraint, nodes_data, objec
     time_dimension = routing.GetDimensionOrDie('Time')
     for location_idx, (start, end) in enumerate(data['time_windows']):
         index = manager.NodeToIndex(location_idx)
-        time_dimension.CumulVar(index).SetRange(start, end)
+        time_dimension.CumulVar(index).SetMin(start)
+        # Gunakan Soft Upper Bound agar AI tidak menyerah gagal jika terpaksa telat
+        # Denda 100 points per detik jika melewati 'end'
+        time_dimension.SetCumulVarSoftUpperBound(index, end, 100)
 
     # 3. SET CONSTRAINT CAPACITY
     def demand_callback(from_index):

@@ -9,8 +9,8 @@ import os
 import time
 
 # ================= KONFIGURASI =================
-FILENAME = 'dataset_vrp_augmented.csv'
-EXPERIMENT_NAME = "Skripsi_VRP_Tegalsari_GPU"
+FILENAME = 'dataset_vrp_augmented_1_setengahx.csv'
+EXPERIMENT_NAME = "Skripsi_VRP_Tegalsari_GPU_Tuned_15x"
 
 def train_model():
     print("="*50)
@@ -76,16 +76,22 @@ def train_model():
         
         # --- KONFIGURASI GPU ---
         params = {
+            # --- KONFIGURASI DASAR & GPU ---
             "objective": "reg:squarederror",
-            "n_estimators": 1000,
-            "learning_rate": 0.02,
-            "max_depth": 8,
-            "subsample": 0.8,
-            "colsample_bytree": 0.8,
-            
-            # --- SETTING CUDA (GPU) ---
-            "device": "cuda",
-            "tree_method": "hist",
+            "tree_method": "hist",             # Menggunakan metode histogram untuk GPU
+            "device": "cuda",                  # Mengaktifkan akselerasi CUDA
+            "n_estimators": 1000,              # Batas maksimal pohon
+            "random_state": 42,
+
+            # --- HASIL TUNING OPTUNA (TEROPTIMASI) ---
+            "learning_rate": 0.04503755949468999,
+            "max_depth": 7,
+            "min_child_weight": 2,
+            "gamma": 0.019841270670142217,
+            "subsample": 0.8525942237370406,
+            "colsample_bytree": 0.8023862099492867,
+            "reg_alpha": 8.700184032853816e-05, # L1 Regularization
+            "reg_lambda": 0.1902709893073167    # L2 Regularization
         }
         
         # Inisialisasi Model

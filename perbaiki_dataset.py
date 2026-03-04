@@ -13,7 +13,7 @@ jam_sibuk_sore = [16, 17, 18]
 
 # 3. KALIKAN DURASI DENGAN FAKTOR 'PARANOID'
 # Kita buat macetnya 2.5 kali lipat lebih lama dari data asli
-FACTOR_MACET = 2.5 
+FACTOR_MACET = 1.5 
 
 def apply_augmentation(row):
     # Jika jam sibuk, durasi dikali factor
@@ -32,6 +32,6 @@ print("\n--- SESUDAH MODIFIKASI (Lebih Macet!) ---")
 print(df[df['hour_of_day'] == 17][['duration_in_traffic_sec']].mean())
 
 # 4. SIMPAN JADI FILE BARU
-df.to_csv('dataset_vrp_augmented.csv', index=False)
+df.to_csv('dataset_vrp_augmented_1_setengahx.csv', index=False)
 print("\n✅ File baru 'dataset_vrp_augmented.csv' berhasil dibuat!")
 print("👉 Silakan TRAIN ULANG model pakai file baru ini.")

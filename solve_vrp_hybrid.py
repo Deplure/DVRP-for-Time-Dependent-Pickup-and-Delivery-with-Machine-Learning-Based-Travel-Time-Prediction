@@ -43,23 +43,27 @@ SERVICE_TIME_SEC = 300     # Waktu Bongkar Muat (5 Menit)
 # Time Window (Detik): (Jam Buka, Jam Tutup) relatif dari jam 08:00
 
 nodes_data = [
-    # 0. DEPOT (Netral)
-    {'id': '0_Depot_JNE',       'lat': -7.265232, 'lon': 112.736966, 'demand': 0,  'tw': (0, 40000)}, 
-    
-    # 1-3. DELIVERY (Harus Drop Barang) -> Demand NEGATIF
-    {'id': '1_TP_Tunjungan',    'lat': -7.262608, 'lon': 112.742352, 'demand': -3, 'tw': (3600, 14400)}, # Buka 09.00-12.00
-    {'id': '2_Hotel_Majapahit', 'lat': -7.260656, 'lon': 112.738876, 'demand': -2, 'tw': (0, 28800)},    # Bebas
-    {'id': '3_Pasar_Kembang',   'lat': -7.269480, 'lon': 112.730594, 'demand': -5, 'tw': (0, 7200)},     # Pagi 08.00-10.00
-    
-    # 4-6. PICKUP (Harus Ambil Barang) -> Demand POSITIF
-    {'id': '4_Siola_Mall',      'lat': -7.256426, 'lon': 112.736236, 'demand': 4,  'tw': (3600, 28800)}, # Buka 09.00+
-    {'id': '5_SMA_Trimurti',    'lat': -7.271378, 'lon': 112.743125, 'demand': 2,  'tw': (0, 10800)},    # Pagi 08.00-11.00
-    {'id': '6_Patung_Sapi',     'lat': -7.263884, 'lon': 112.742308, 'demand': 1,  'tw': (0, 28800)},    # Bebas
+    # 0. DEPOT
+    {'id': '0_Depot_JNE',       'lat': -7.265232, 'lon': 112.736966, 'demand': 0,  'tw': (0, 86400)}, 
 
-    # 7-9. CAMPURAN
-    {'id': '7_Rawon_Setan',     'lat': -7.261884, 'lon': 112.739778, 'demand': 3,  'tw': (18000, 28800)}, # Sore 13.00+ (Pickup)
-    {'id': '8_Pandegiling',     'lat': -7.273641, 'lon': 112.733470, 'demand': -2, 'tw': (0, 28800)},     # Bebas (Drop)
-    {'id': '9_Gramedia',        'lat': -7.266857, 'lon': 112.742223, 'demand': -2, 'tw': (3600, 28800)}   # Bebas (Drop)
+    # --- URUTAN JEBAKAN 1: SMA TRIMURTI (Deadline 16:30) ---
+    {'id': '5_SMA_Trimurti',    'lat': -7.271378, 'lon': 112.743125, 'demand': 2,  'tw': (0, 1800)}, 
+
+    # --- URUTAN JEBAKAN 2: RAWON SETAN (Deadline 16:45) ---
+    # Jarak dari SMA dekat (Distance VRP suka).
+    # Waktu tempuh dari SMA lama (23 menit).
+    # Deadline cuma selisih 15 menit dari SMA.
+    # Distance VRP PASTI TELAT disini.
+    {'id': '7_Rawon_Setan',     'lat': -7.261884, 'lon': 112.739778, 'demand': 3,  'tw': (0, 2700)},
+
+    # --- FILLER (Bebas) ---
+    {'id': '4_Siola_Mall',      'lat': -7.256426, 'lon': 112.736236, 'demand': 4,  'tw': (0, 3600)},
+    {'id': '1_TP_Tunjungan',    'lat': -7.262608, 'lon': 112.742352, 'demand': -3, 'tw': (0, 3600)},
+    {'id': '3_Pasar_Kembang',   'lat': -7.269480, 'lon': 112.730594, 'demand': -5, 'tw': (0, 3600)},
+    {'id': '8_Pandegiling',     'lat': -7.273641, 'lon': 112.733470, 'demand': -2, 'tw': (0, 3600)},
+    {'id': '2_Hotel_Majapahit', 'lat': -7.260656, 'lon': 112.738876, 'demand': -2, 'tw': (0, 3600)},
+    {'id': '9_Gramedia',        'lat': -7.266857, 'lon': 112.742223, 'demand': -2, 'tw': (0, 3600)},
+    {'id': '6_Patung_Sapi',     'lat': -7.263884, 'lon': 112.742308, 'demand': 1,  'tw': (0, 3600)},
 ]
 
 # ================= 2. FUNGSI UTILITAS =================
@@ -241,8 +245,19 @@ def solve_vrp_final(time_matrix, nodes_data, model, start_hour, is_rain):
 
     # F. Solving
     search_parameters = pywrapcp.DefaultRoutingSearchParameters()
+    
+    # 1. Cari solusi pertama yang paling logis
     search_parameters.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
     
+    # 2. METAHEURISTIC (ANTI LOCAL OPTIMUM)
+    # Gunakan Guided Local Search untuk keluar dari jebakan rute pendek yang salah
+    search_parameters.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
+    
+    # 3. Time Limit (WAJIB JIKA PAKAI GLS)
+    # Batasi waktu pencarian selama 5 detik agar tidak infinite loop
+    search_parameters.time_limit.seconds = 5 
+    
+    # Mulai Proses Pencarian...
     solution = routing.SolveWithParameters(search_parameters)
 
     # --- PRINT HASIL PERENCANAAN & JALANKAN SIMULASI ---

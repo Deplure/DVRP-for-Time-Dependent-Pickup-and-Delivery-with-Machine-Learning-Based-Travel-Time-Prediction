@@ -212,3 +212,6 @@ mlruns/
 osrm-docker/
 hasil_test_koordinat.csv
 hasil_testing_jam_kerja.csv
+vrp-project/
+dataset_vrp_augmented_1_setengahx.csv
+dataset_vrp_augmented_2x.csv

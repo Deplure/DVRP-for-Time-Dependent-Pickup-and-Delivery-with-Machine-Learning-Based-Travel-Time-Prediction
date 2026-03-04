@@ -56,16 +56,16 @@ nodes_data = [
     # Waktu tempuh dari SMA lama (23 menit).
     # Deadline cuma selisih 15 menit dari SMA.
     # Distance VRP PASTI TELAT disini.
-    {'id': '7_Rawon_Setan',     'lat': -7.261884, 'lon': 112.739778, 'demand': 3,  'tw': (0, 2700)}, 
+    {'id': '7_Rawon_Setan',     'lat': -7.261884, 'lon': 112.739778, 'demand': 3,  'tw': (0, 1800)},
 
     # --- FILLER (Bebas) ---
-    {'id': '4_Siola_Mall',      'lat': -7.256426, 'lon': 112.736236, 'demand': 4,  'tw': (0, 3600)}, 
-    {'id': '1_TP_Tunjungan',    'lat': -7.262608, 'lon': 112.742352, 'demand': -3, 'tw': (0, 3600)}, 
-    {'id': '3_Pasar_Kembang',   'lat': -7.269480, 'lon': 112.730594, 'demand': -5, 'tw': (0, 3600)}, 
-    {'id': '8_Pandegiling',     'lat': -7.273641, 'lon': 112.733470, 'demand': -2, 'tw': (0, 3600)},     
-    {'id': '2_Hotel_Majapahit', 'lat': -7.260656, 'lon': 112.738876, 'demand': -2, 'tw': (0, 3600)}, 
-    {'id': '9_Gramedia',        'lat': -7.266857, 'lon': 112.742223, 'demand': -2, 'tw': (0, 3600)},
-    {'id': '6_Patung_Sapi',     'lat': -7.263884, 'lon': 112.742308, 'demand': 1,  'tw': (0, 3600)},    
+    {'id': '4_Siola_Mall',      'lat': -7.256426, 'lon': 112.736236, 'demand': 4,  'tw': (0, 900)},
+    {'id': '1_TP_Tunjungan',    'lat': -7.262608, 'lon': 112.742352, 'demand': -3, 'tw': (0, 900)},
+    {'id': '3_Pasar_Kembang',   'lat': -7.269480, 'lon': 112.730594, 'demand': -5, 'tw': (0, 900)},
+    {'id': '8_Pandegiling',     'lat': -7.273641, 'lon': 112.733470, 'demand': -2, 'tw': (900, 1800)},
+    {'id': '2_Hotel_Majapahit', 'lat': -7.260656, 'lon': 112.738876, 'demand': -2, 'tw': (900, 1800)},
+    {'id': '9_Gramedia',        'lat': -7.266857, 'lon': 112.742223, 'demand': -2, 'tw': (900, 1800)},
+    {'id': '6_Patung_Sapi',     'lat': -7.263884, 'lon': 112.742308, 'demand': 1,  'tw': (900, 1800)},
 ]
 
 # ================= 2. HELPERS =================

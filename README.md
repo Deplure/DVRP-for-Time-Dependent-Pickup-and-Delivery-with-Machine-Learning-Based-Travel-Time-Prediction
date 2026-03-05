@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Bachelor-Thesis: AI-Driven VRP
 # 🚦 Prediksi Kemacetan & Optimasi Rute (Tegalsari, Surabaya)
 
@@ -86,3 +87,6 @@ npm run dev
 ---
 **Dicky Eka Putra** | Mahasiswa Tingkat Akhir - ITS
 Project Tugas Akhir - 2026
+=======
+# DVRP-for-Time-Dependent-Pickup-and-Delivery-with-Machine-Learning-Based-Travel-Time-Prediction
+>>>>>>> 3b27926b6b0e58c74ca6769addb22fb2673876e4

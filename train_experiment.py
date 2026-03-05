@@ -9,8 +9,8 @@ import os
 import time
 
 # ================= KONFIGURASI =================
-FILENAME = 'dataset_vrp_augmented_1_setengahx.csv'
-EXPERIMENT_NAME = "Skripsi_VRP_Tegalsari_GPU_Tuned_15x"
+FILENAME = 'dataset_vrp_augmented_Cleaned.csv'
+EXPERIMENT_NAME = "Skripsi_VRP_Tegalsari_GPU_Tuned_Cleaned"
 
 def train_model():
     print("="*50)

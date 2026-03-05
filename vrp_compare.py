@@ -107,15 +107,25 @@ def get_realtime_weather(lat, lon):
         return 0, "Unknown"
     except: return 0, "Error"
 
-def get_osm_route_local(lat1, lon1, lat2, lon2):
-    url = f"{OSRM_URL}/route/v1/driving/{lon1},{lat1};{lon2},{lat2}?overview=false"
+def get_osrm_table(nodes_data):
+    """Mengambil matrix jarak dan waktu dari OSRM dalam sekali jalan via Bulk API."""
+    coords = ";".join([f"{n['lon']},{n['lat']}" for n in nodes_data])
+    url = f"{OSRM_URL}/table/v1/driving/{coords}?annotations=duration,distance"
+    
+    n = len(nodes_data)
     try:
-        r = requests.get(url, timeout=0.5) 
+        r = requests.get(url, timeout=10.0)
         if r.status_code == 200:
-            d = r.json()['routes'][0]
-            return d['distance'], d['duration']
-        return 0, 0
-    except: return 0, 0
+            d = r.json()
+            # Convert float m/s to int
+            distances = [[int(val) for val in row] for row in d['distances']]
+            durations = [[int(val) for val in row] for row in d['durations']]
+            return distances, durations
+    except Exception as e:
+        print(f"OSRM Error: {e}")
+        pass
+        
+    return [[1000]*n for _ in range(n)], [[120]*n for _ in range(n)]
 
 # ================= 3. GENERATORS =================
 
@@ -127,12 +137,17 @@ def generate_hybrid_matrix(model, nodes_data, hour, day, is_rain):
     
     predict_payload = []
     matrix_indices = [] 
+    
+    dists, durs = get_osrm_table(nodes_data)
+    
     for i in range(num_nodes):
         for j in range(num_nodes):
             if i == j: continue 
             lat1, lon1 = nodes_data[i]['lat'], nodes_data[i]['lon']
             lat2, lon2 = nodes_data[j]['lat'], nodes_data[j]['lon']
-            dist, dur_normal = get_osm_route_local(lat1, lon1, lat2, lon2)
+            
+            dist = dists[i][j]
+            dur_normal = durs[i][j]
             if dist == 0: dist, dur_normal = 1000, 120
             
             row = {'origin_lat': lat1, 'origin_lng': lon1, 'dest_lat': lat2, 'dest_lng': lon2,
@@ -159,12 +174,17 @@ def generate_distance_matrix(nodes_data):
     
     print(f"   📏 Generate Matrix Jarak (OSRM Distance)...")
     
+    dists, durs = get_osrm_table(nodes_data)
+    
     for i in range(num_nodes):
         for j in range(num_nodes):
             if i == j: continue 
             lat1, lon1 = nodes_data[i]['lat'], nodes_data[i]['lon']
             lat2, lon2 = nodes_data[j]['lat'], nodes_data[j]['lon']
-            dist, dur = get_osm_route_local(lat1, lon1, lat2, lon2)
+            
+            dist = dists[i][j]
+            dur = durs[i][j]
+            if dist == 0: dist, dur = 1000, 120
             
             dist_matrix[i][j] = int(dist) # Cost optimization pakai Meter
             normal_time_matrix[i][j] = int(dur) # Constraint pakai Detik Normal
@@ -260,7 +280,7 @@ def solve_vrp_modular(cost_matrix, time_matrix_for_constraint, nodes_data, objec
 
 # ================= 5. SIMULATOR (WASIT) - VERSI DETAIL =================
 
-def simulate_dynamic_trip(model, route_list, start_time, nodes_data, is_rain):
+def simulate_dynamic_trip(model, route_list, start_time, nodes_data, is_rain, matrix_dist, matrix_normal):
     current_time = start_time
     total_duration_sec = 0
     total_lateness_count = 0 # Hitung berapa kali telat
@@ -275,8 +295,8 @@ def simulate_dynamic_trip(model, route_list, start_time, nodes_data, is_rain):
         node_to = nodes_data[idx_to]
         
         # 1. Ambil Data Real (OSRM)
-        dist, dur_normal = get_osm_route_local(node_from['lat'], node_from['lon'], 
-                                               node_to['lat'], node_to['lon'])
+        dist = matrix_dist[idx_from][idx_to]
+        dur_normal = matrix_normal[idx_from][idx_to]
         
         # 2. Prediksi AI (Real Traffic)
         # Kita gunakan logic AI untuk simulasi karena ini dianggap 'Kenyataan'
@@ -345,9 +365,10 @@ if __name__ == "__main__":
         if "PASTE_RUN_ID" in MODEL_PATH:
             print("❌ ERROR: Isi MODEL_PATH di baris 20 dulu!")
             exit()
+        mlflow.set_tracking_uri("http://127.0.0.1:5000")
         model = mlflow.xgboost.load_model(MODEL_PATH)
-    except:
-        print("❌ Gagal load model. Pastikan Run ID benar.")
+    except Exception as e:
+        print(f"❌ Gagal load model. Pastikan Run ID benar. Detail: {e}")
         exit()
 
     # Input Manual Jam Simulasi
@@ -390,7 +411,7 @@ if __name__ == "__main__":
     for i, rute in enumerate(routes_ai):
         if len(rute) > 2:
             # Panggil fungsi simulate yang baru (return 2 nilai: durasi & jumlah telat)
-            dur, late = simulate_dynamic_trip(model, rute, base_time, nodes_data, is_rain) 
+            dur, late = simulate_dynamic_trip(model, rute, base_time, nodes_data, is_rain, matrix_dist, matrix_normal_time) 
             total_time_ai_scenario += dur
             ai_lateness += late
             print(f"   👉 Total Durasi Kurir {i+1}: {dur/60:.1f} menit")
@@ -401,20 +422,32 @@ if __name__ == "__main__":
     for i, rute in enumerate(routes_dist):
         if len(rute) > 2:
             # Panggil fungsi simulate yang baru
-            dur, late = simulate_dynamic_trip(model, rute, base_time, nodes_data, is_rain)
+            dur, late = simulate_dynamic_trip(model, rute, base_time, nodes_data, is_rain, matrix_dist, matrix_normal_time)
             total_time_dist_scenario += dur
             dist_lateness += late
             print(f"   👉 Total Durasi Kurir {i+1}: {dur/60:.1f} menit")
 
-    # 5. SCORE BOARD UPDATE
+    # 5. SCORE BOARD UPDATE (BIAYA BENSIN & DENDA)
     print(f"\n{'='*20} SCORE BOARD {'='*20}")
-    print(f"🤖 AI VRP       : {total_time_ai_scenario/60:.1f} Menit | 🚨 Pelanggaran: {ai_lateness}")
-    print(f"📏 Distance VRP : {total_time_dist_scenario/60:.1f} Menit | 🚨 Pelanggaran: {dist_lateness}")
     
-    if dist_lateness > ai_lateness:
-        print(f"\n🏆 AI MENANG TELAK! (Distance VRP telat {dist_lateness} kali karena macet).")
-        print("   Alasan: Distance VRP memilih jalan pendek tapi macet, sehingga telat sampai tujuan.")
-    elif total_time_ai_scenario < total_time_dist_scenario:
-        print(f"\n🏆 AI MENANG WAKTU! (Lebih cepat sampai).")
+    # AI Cost
+    bensin_ai = int((total_time_ai_scenario / 60) * 300)
+    denda_ai = ai_lateness * 20000
+    total_rp_ai = bensin_ai + denda_ai
+    
+    # Dist Cost (Standard ETA)
+    bensin_dist = int((total_time_dist_scenario / 60) * 300)
+    denda_dist = dist_lateness * 20000
+    total_rp_dist = bensin_dist + denda_dist
+    
+    print(f"🤖 AI VRP       : Bensin Rp {bensin_ai:,} | Denda Rp {denda_ai:,} | TOTAL Rp {total_rp_ai:,}")
+    print(f"📏 Standard VRP : Bensin Rp {bensin_dist:,} | Denda Rp {denda_dist:,} | TOTAL Rp {total_rp_dist:,}")
+    
+    if total_rp_ai < total_rp_dist:
+        hemat = total_rp_dist - total_rp_ai
+        print(f"\n🏆 AI MENANG! (Lebih hemat Rp {hemat:,}).")
+    elif total_rp_ai > total_rp_dist:
+        hemat = total_rp_ai - total_rp_dist
+        print(f"\n🏆 LAMA MENANG! (Standard ETA lebih hemat Rp {hemat:,}).")
     else:
-        print("\n🤝 SERI / Distance Menang.")
+        print("\n🤝 SERI / Biaya sama persis.")

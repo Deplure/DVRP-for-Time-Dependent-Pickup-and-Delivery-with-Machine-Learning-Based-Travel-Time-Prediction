@@ -209,9 +209,20 @@ __marimo__/
 
 __pycache__/
 mlruns/
-osrm-docker/
 hasil_test_koordinat.csv
 hasil_testing_jam_kerja.csv
-vrp-project/
 dataset_vrp_augmented_1_setengahx.csv
 dataset_vrp_augmented_2x.csv
+
+# VRP React & FastAPI Cache/Build
+vrp-project/frontend/node_modules/
+vrp-project/frontend/dist/
+vrp-project/backend/locations.db
+
+# Machine Learning Large Artifacts
+ml_pipeline/mlflow.db
+ml_pipeline/models/
+
+# OSRM Infrastructure Data (Peta 2.5GB+)
+infrastructure/osrm/java-latest*
+infrastructure/osrm/surabaya*

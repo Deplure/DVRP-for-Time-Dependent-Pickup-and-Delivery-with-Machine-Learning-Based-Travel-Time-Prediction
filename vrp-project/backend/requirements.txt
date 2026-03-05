@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+pandas
+xgboost
+mlflow
+ortools
+requests
+python-dotenv

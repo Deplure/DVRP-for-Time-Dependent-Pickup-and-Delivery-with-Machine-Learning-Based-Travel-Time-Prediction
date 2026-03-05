@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  osrm-backend:
+    image: osrm/osrm-backend
+    container_name: osrm-surabaya
+    restart: always
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./osrm-data:/data
+    # Command to run the routing engine using the pre-processed MLD (Multi-Level Dijkstra) files.
+    # It assumes the file is named surabaya.osrm
+    command: "osrm-routed --algorithm mld /data/surabaya.osrm"
+
+# =========================================================================================
+# OSRM PRE-PROCESSING INSTRUCTIONS
+# =========================================================================================
+# If you haven't processed the map data yet, you need to download a .osm.pbf file 
+# (e.g., for Surabaya/East Java from Geofabrik) and put it in the `./osrm-data` folder.
+# Rename it to `surabaya.osm.pbf` for consistency.
+#
+# Then, run the following Docker commands from this directory to pre-process the map:
+#
+# 1. Extract the road network (using the car profile):
+# docker run -t -v "${PWD}/osrm-data:/data" osrm/osrm-backend osrm-extract -p /opt/car.lua /data/surabaya.osm.pbf
+#
+# 2. Partition the graph (for MLD algorithm):
+# docker run -t -v "${PWD}/osrm-data:/data" osrm/osrm-backend osrm-partition /data/surabaya.osrm
+#
+# 3. Customize the cells (for MLD algorithm):
+# docker run -t -v "${PWD}/osrm-data:/data" osrm/osrm-backend osrm-customize /data/surabaya.osrm
+#
+# After running those three steps, you can start the service normally with:
+# docker-compose up -d
+# =========================================================================================

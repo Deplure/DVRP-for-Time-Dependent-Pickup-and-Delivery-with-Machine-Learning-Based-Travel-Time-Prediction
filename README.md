@@ -1,59 +1,88 @@
-# Bachelor-Thesis
-# 🚦 Traffic Prediction - Tegalsari, Surabaya
+# Bachelor-Thesis: AI-Driven VRP
+# 🚦 Prediksi Kemacetan & Optimasi Rute (Tegalsari, Surabaya)
 
-Repositori ini berisi kode sumber dan eksperimen untuk Tugas Akhir (Skripsi) mengenai prediksi kepadatan lalu lintas di area **Tegalsari, Surabaya**. 
+Repositori ini berisi kode sumber dan eksperimen untuk **Tugas Akhir (Skripsi)** mengenai prediksi kepadatan lalu lintas dan integrasinya ke dalam *Vehicle Routing Problem (VRP)* di area **Tegalsari, Surabaya**.
 
-Proyek ini mencakup proses *data harvesting*, pengolahan data, hingga pemodelan *Machine Learning* untuk memprediksi pola lalu lintas.
+Proyek ini terstruktur menggunakan pendekatan *Clean Architecture*, memisahkan alur eksperimen *Data Science* dari sistem *Fullstack Web Application* agar pengelolaan kode menjadi rapi, modular, dan *production-grade*.
 
 ## 📌 Tentang Proyek
 
-Tujuan utama dari penelitian ini adalah mengembangkan model yang mampu memprediksi kondisi lalu lintas berdasarkan data historis yang dikumpulkan. Sistem ini dirancang untuk membantu memahami dinamika kemacetan di salah satu area tersibuk di Surabaya.
+Sistem ini dikembangkan untuk menentukan rute kurir logistik paling efisien dengan menimbang realita **hambatan waktu akibat kemacetan lalu lintas**. 
 
-**Fokus Utama:**
-* **Data Harvesting:** Pengumpulan data lalu lintas *real-time* atau historis.
-* **Preprocessing:** Pembersihan dan penyiapan data untuk pemodelan.
-* **Modeling:** Eksperimen menggunakan algoritma *Machine Learning* (dilacak menggunakan MLflow).
-* **Analisis:** Evaluasi performa model prediksi.
+**Fokus Utama Eksperimen AI:**
+* **Data Harvesting:** Pengumpulan data lalu lintas *real-time* via API pemetaan.
+* **Predictive Modeling:** Pemodelan Machine Learning (Predictive Traffic) dengan metrik yang dipantau ketat.
+* **Routing Solver:** Penerapan Heuristic Guided Local Search (GLS) pada model OR-Tools untuk mencari jarak/biaya *bensin* terendah dan meminimalisir pinalti keterlambatan *Time Window*.
 
 ## 🛠️ Teknologi yang Digunakan
 
-Proyek ini dibangun menggunakan:
+Proyek ini dibangun menggunakan gabungan ekosistem AI dan Web:
 
-* **Bahasa:** Python 3.11
-* **Environment Management:** Conda
-* **Machine Learning:** Scikit-Learn (atau library lain yang kamu pakai seperti TensorFlow/PyTorch)
-* **Experiment Tracking:** MLflow
-* **Data Manipulation:** Pandas, NumPy
-* **Tools:** VS Code, Git
+* **Machine Learning Ops:** XGBoost, Scikit-Learn, Pandas, MLflow
+* **Routing Engine Ops:** Google OR-Tools, Dockerized OSRM (Open Source Routing Machine)
+* **Backend API Server:** Python FastAPI, Uvicorn, SQLite
+* **Frontend Web App:** React.js, Vite, TailwindCSS, Chakra UI / Horizon UI
+* **Other Tools:** Conda, Git
 
-## 📂 Struktur Folder
+## 📂 Struktur Repositori (Clean Architecture)
 
 ```text
-/Thesis-VRP-System
+/Bachelor-Thesis
 │
-├── /backend            <-- OTAK SISTEM (Python FastAPI)
-│   ├── main.py         <-- Pintu masuk API (Server & Endpoint)
-│   ├── vrp_engine.py   <-- Script AI VRP (Logic OR-Tools & XGBoost)
-│   ├── geocoder.py     <-- [BARU] Script "Smart Caching" (Nominatim + SQLite)
-│   ├── models.py       <-- Definisi Data (Pydantic Models)
-│   ├── database.db     <-- Database (Menyimpan Orderan & Cache Alamat)
-│   ├── .env            <-- Kunci API & Run ID MLflow
-│   └── requirements.txt <-- [PENTING] Daftar library (fastapi, ortools, dll)
+├── 📁 infrastructure/             <-- OSRM MAP SERVER
+│   └── 📁 osrm/                   <-- Konfigurasi & Data Peta Java/Surabaya
+│       ├── docker-compose.yml     <-- Script Runner OSRM MLD Server
+│       └── java-latest.osrm.*     <-- Data Geometri & Routing Index
 │
-├── /frontend           <-- WAJAH SISTEM (React.js)
-│   ├── public/
-│   ├── src/
-│   │   ├── components/ <-- [SARAN] Pecah komponen biar rapi
-│   │   │   ├── MapView.js    <-- Khusus Peta
-│   │   │   ├── OrderList.js  <-- Khusus Tabel Order
-│   │   │   └── StatsCard.js  <-- Khusus Angka Statistik
-│   │   ├── App.js      <-- Layout Utama
-│   │   ├── api.js      <-- Jembatan ke Backend
-│   │   └── index.css   <-- Styling (Tailwind/CSS)
-│   └── package.json
+├── 📁 ml_pipeline/                <-- ML EXPERIMENTATION ZONE
+│   ├── dataset_*.csv              <-- Data Latih Historis
+│   ├── harvest_traffic.py         <-- Script Scraper Kemacetan
+│   ├── parameter_tuning.py        <-- Tuning Hyperparameter
+│   ├── train_experiment.py        <-- Script Training Model AI
+│   ├── solve_vrp_hybrid.py        <-- Script Optimisasi Dasar
+│   ├── vrp_compare.py             <-- Script Wasit (Benchmarking) AI vs Traditional
+│   ├── mlflow.db                  <-- Database Log Eksperimen MLflow
+│   └── 📁 models/                 <-- Model XGBoost tersimpan
 │
-└── /docker-osrm        <-- MAP SERVER (Biarkan jalan sendiri)
+└── 📁 vrp-project/                <-- FULLSTACK WEB APPLICATION
+    │
+    ├── 📁 backend/                <-- OTAK SISTEM VRP (Python FastAPI)
+    │   ├── main.py                <-- Endpoint API Utama & Integrasi Solver
+    │   ├── locations.db           <-- Cache Alamat Geocoding
+    │   ├── .env                   <-- API Keys & Pointer Model Tracking
+    │   └── requirements.txt       <-- Library Dependency Induk
+    │
+    └── 📁 frontend/               <-- WAJAH SISTEM VRP (React.js)
+        ├── package.json           <-- NPM Dependency
+        └── 📁 src/                
+            ├── 📁 components/     <-- Konfigurasi Peta (Leaflet) dsb.
+            ├── 📁 views/          <-- Halaman Utama Dashboard
+            └── App.jsx            <-- Layout Utama Routing & Visualisasi
+```
 
-Dicky Eka Putra Mahasiswa Tingkat Akhir - ITS
+## 🚀 Panduan Eksekusi
 
+### 1. Menjalankan OSRM (Map Engine)
+Pastikan Docker dan Docker Compose berjalan.
+```bash
+cd infrastructure/osrm
+docker-compose up -d
+```
+
+### 2. Menjalankan Backend (FastAPI VRP Solver)
+Buka terminal baru pada environment conda project ini.
+```bash
+cd vrp-project/backend
+uvicorn main:app --reload
+```
+
+### 3. Menjalankan Frontend (React Dashboard)
+Buka terminal baru untuk NodeJS.
+```bash
+cd vrp-project/frontend
+npm run dev
+```
+
+---
+**Dicky Eka Putra** | Mahasiswa Tingkat Akhir - ITS
 Project Tugas Akhir - 2026

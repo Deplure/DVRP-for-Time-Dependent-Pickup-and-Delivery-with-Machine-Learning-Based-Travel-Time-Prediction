@@ -104,12 +104,6 @@ const taskBadge = (task) => {
     )
 }
 
-const formatObjVal = (val) => {
-    if (!val && val !== 0) return '—'
-    if (val >= 60) return `${Math.floor(val / 60)}m ${val % 60}s`
-    return `${val}s`
-}
-
 const formatRp = (num) => {
     if (!num && num !== 0) return 'Rp —'
     return 'Rp ' + Number(num).toLocaleString('id-ID')
@@ -278,8 +272,6 @@ function VehicleRoutePanel({ vehicle, colorIdx }) {
     )
 }
 
-// (AddNodeModal removed — replaced by inline geocoding search)
-
 // ===================== MAIN APP =====================
 export default function App() {
     // --- Global state ---
@@ -292,23 +284,23 @@ export default function App() {
     const [osrmLoading, setOsrmLoading] = useState(false)
 
     // --- Tab state ---
-    const [activeTab, setActiveTab] = useState('configuration') // 'configuration' | 'manifest'
+    const [activeTab, setActiveTab] = useState('configuration')
 
     // --- Configuration state ---
     const [numVehicles, setNumVehicles] = useState(5)
     const [vehicleCapacity, setVehicleCapacity] = useState(20)
-    const [startHour, setStartHour] = useState(16)
+    const [startTime, setStartTime] = useState('08:00')
     const [nodes, setNodes] = useState(DEFAULT_NODES)
+
+    // --- Dynamic Injection State ---
+    const [newOrders, setNewOrders] = useState([])
+    const [interruptTime, setInterruptTime] = useState('10:00')
 
     // --- Geocoding / search state ---
     const [searchQuery, setSearchQuery] = useState('')
     const [searchLoading, setSearchLoading] = useState(false)
     const [searchError, setSearchError] = useState(null)
     const [savedLocations, setSavedLocations] = useState([])
-
-    const activeVehicles = result?.routes?.filter(r =>
-        r.steps?.some(s => s.task !== 'START' && s.task !== 'FINISH')
-    ).length ?? 0
 
     // ---- Remove a node by index ----
     const removeNode = (idx) => setNodes(prev => prev.filter((_, i) => i !== idx))
@@ -345,7 +337,6 @@ export default function App() {
             const loc = await res.json()
             addLocationToNodes(loc)
             setSearchQuery('')
-            // Refresh saved locations chips
             fetchSavedLocations()
         } catch (e) {
             setSearchError(e.message)
@@ -362,10 +353,9 @@ export default function App() {
         } catch (_) { /* server may be offline */ }
     }
 
-    // ---- Load saved locations on mount ----
     useEffect(() => { fetchSavedLocations() }, [])
 
-    // ---- Fetch real road geometry from local OSRM for each vehicle route ----
+    // ---- Fetch real road geometry from local OSRM ----
     const fetchOsrmRoads = async (routes, currentNodes) => {
         setOsrmLoading(true)
         const roadGeoms = []
@@ -414,6 +404,7 @@ export default function App() {
         setOsrmLoading(false)
     }
 
+    // ---- Run AI Optimization ----
     const handleOptimize = async () => {
         setLoading(true)
         setStatus('OPTIMIZING')
@@ -421,12 +412,11 @@ export default function App() {
         setResult(null)
         setOsrmRoads([])
 
-        // Build payload from state (dynamic)
         const payload = {
             nodes,
             num_vehicles: numVehicles,
             vehicle_capacity: vehicleCapacity,
-            start_hour: startHour,
+            start_time: startTime,
         }
 
         try {
@@ -434,12 +424,49 @@ export default function App() {
             setResult(res.data)
             setStatus('SUCCESS')
             setMapKey(k => k + 1)
-            // Auto-switch to Route Manifest tab on success
             setActiveTab('manifest')
-            // Fetch OSRM road geometry using current nodes state
             await fetchOsrmRoads(res.data.routes, nodes)
         } catch (err) {
             const msg = err.response?.data?.detail || err.message || 'Koneksi ke backend gagal'
+            setError(msg)
+            setStatus('ERROR')
+        } finally {
+            setLoading(false)
+        }
+    }
+
+    // --- Fungsi Handle Dynamic Injection ---
+    const handleDynamicInjection = async () => {
+        if (newOrders.length === 0) return
+        setLoading(true)
+        setStatus('OPTIMIZING')
+        setError(null)
+
+        const payload = {
+            original_nodes: nodes,
+            original_routes: result.routes,
+            new_orders: newOrders,
+            start_time: startTime,
+            interrupt_time: interruptTime,
+            num_vehicles: numVehicles,
+            vehicle_capacity: vehicleCapacity
+        }
+
+        try {
+            const res = await axios.post('http://localhost:8000/dynamic_injection', payload)
+            setResult(res.data)
+            setStatus('SUCCESS')
+            setMapKey(k => k + 1)
+            setActiveTab('manifest')
+
+            // Gabungkan node lama dan baru agar petanya ter-update
+            const combinedNodes = [...nodes, ...newOrders]
+            setNodes(combinedNodes)
+            setNewOrders([])
+
+            await fetchOsrmRoads(res.data.routes, combinedNodes)
+        } catch (err) {
+            const msg = err.response?.data?.detail || err.message || 'Gagal inject orderan baru.'
             setError(msg)
             setStatus('ERROR')
         } finally {
@@ -452,6 +479,7 @@ export default function App() {
         setResult(null)
         setError(null)
         setOsrmRoads([])
+        setNewOrders([])
         setActiveTab('configuration')
     }
 
@@ -478,8 +506,6 @@ export default function App() {
             {/* Radial glow at top */}
             <div className="fixed inset-x-0 top-0 h-64 pointer-events-none z-0"
                 style={{ background: 'radial-gradient(ellipse 80% 50% at 50% -10%, rgba(168,85,247,0.15) 0%, transparent 100%)' }} />
-
-            {/* (Modal removed — using inline geocoding search) */}
 
             {/* ===================== HEADER ===================== */}
             <header className="relative z-10 border-b" style={{ borderColor: 'rgba(168,85,247,0.15)', background: 'rgba(2,6,23,0.8)', backdropFilter: 'blur(12px)' }}>
@@ -608,10 +634,8 @@ export default function App() {
                                     maxZoom={20}
                                 />
 
-                                {/* Fit bounds to nodes state */}
                                 <MapBounds nodes={nodes} />
 
-                                {/* Node Markers from state */}
                                 {nodes.map((node, i) => (
                                     <Marker
                                         key={node.id}
@@ -640,9 +664,8 @@ export default function App() {
                                 {/* OSRM Snap-to-Road Polylines */}
                                 {osrmRoads.map((road, i) =>
                                     road.latLngs && road.latLngs.length > 1 ? (
-                                        <>
+                                        <div key={i}>
                                             <Polyline
-                                                key={`glow-${i}`}
                                                 positions={road.latLngs}
                                                 color={road.color}
                                                 weight={10}
@@ -652,7 +675,6 @@ export default function App() {
                                                 lineJoin="round"
                                             />
                                             <Polyline
-                                                key={`line-${i}`}
                                                 positions={road.latLngs}
                                                 color={road.color}
                                                 weight={4}
@@ -661,7 +683,7 @@ export default function App() {
                                                 lineCap="round"
                                                 lineJoin="round"
                                             />
-                                        </>
+                                        </div>
                                     ) : null
                                 )}
                             </MapContainer>
@@ -674,7 +696,6 @@ export default function App() {
 
                             {/* ---- TAB HEADER ---- */}
                             <div className="flex border-b" style={{ borderColor: 'rgba(168,85,247,0.15)' }}>
-                                {/* Configuration Tab */}
                                 <button
                                     onClick={() => setActiveTab('configuration')}
                                     className="flex-1 flex items-center justify-center gap-1.5 py-3 text-xs font-bold font-mono tracking-wider transition-all duration-200 relative"
@@ -691,7 +712,6 @@ export default function App() {
                                     )}
                                 </button>
 
-                                {/* Route Manifest Tab */}
                                 <button
                                     onClick={() => setActiveTab('manifest')}
                                     className="flex-1 flex items-center justify-center gap-1.5 py-3 text-xs font-bold font-mono tracking-wider transition-all duration-200 relative"
@@ -729,7 +749,6 @@ export default function App() {
                                                 {[
                                                     { label: 'Vehicles', value: numVehicles, setter: setNumVehicles, min: 1, max: 10 },
                                                     { label: 'Capacity', value: vehicleCapacity, setter: setVehicleCapacity, min: 1, max: 100 },
-                                                    { label: 'Start Hr', value: startHour, setter: setStartHour, min: 0, max: 23 },
                                                 ].map(({ label, value, setter, min, max }) => (
                                                     <div key={label}>
                                                         <label className="text-xs text-slate-600 font-mono mb-1 block">{label}</label>
@@ -751,6 +770,27 @@ export default function App() {
                                                         />
                                                     </div>
                                                 ))}
+
+                                                {/* [UBAHAN] Input Start Time dengan limit min dan max */}
+                                                <div>
+                                                    <label className="text-xs text-slate-600 font-mono mb-1 block">Start Time</label>
+                                                    <input
+                                                        type="time"
+                                                        min="07:00"
+                                                        max="19:00"
+                                                        value={startTime}
+                                                        onChange={e => setStartTime(e.target.value)}
+                                                        style={neonInput}
+                                                        onFocus={e => {
+                                                            e.target.style.borderColor = 'rgba(168,85,247,0.6)'
+                                                            e.target.style.boxShadow = '0 0 0 2px rgba(168,85,247,0.1)'
+                                                        }}
+                                                        onBlur={e => {
+                                                            e.target.style.borderColor = 'rgba(168,85,247,0.25)'
+                                                            e.target.style.boxShadow = 'none'
+                                                        }}
+                                                    />
+                                                </div>
                                             </div>
                                         </div>
 
@@ -855,7 +895,6 @@ export default function App() {
                                                             border: idx === 0 ? '1px solid rgba(74,222,128,0.18)' : '1px solid rgba(168,85,247,0.12)',
                                                         }}
                                                     >
-                                                        {/* Top row: badge + name + delete */}
                                                         <div className="flex items-center gap-2 mb-1.5">
                                                             <div
                                                                 className="flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center font-mono font-bold"
@@ -880,11 +919,9 @@ export default function App() {
                                                                 </button>
                                                             )}
                                                         </div>
-                                                        {/* Coords (read-only) */}
                                                         <p className="text-xs font-mono text-slate-600 mb-1.5 pl-7">
                                                             {node.lat.toFixed(4)}, {node.lon.toFixed(4)}
                                                         </p>
-                                                        {/* Editable fields row */}
                                                         <div className="grid grid-cols-3 gap-1.5 pl-7">
                                                             {[
                                                                 { field: 'demand', label: 'Demand' },
@@ -921,6 +958,61 @@ export default function App() {
                                             </div>
                                         </div>
 
+                                        {/* ===== DYNAMIC EVENT INJECTION ===== */}
+                                        {result && (
+                                            <div className="p-4 rounded-lg border fade-in-up" style={{ background: 'rgba(249,115,22,0.06)', border: '1px solid rgba(249,115,22,0.3)' }}>
+                                                <p className="text-xs text-orange-400 uppercase tracking-widest font-medium mb-3 flex items-center gap-1.5">
+                                                    <Zap size={14} /> Ada Orderan Mendadak?
+                                                </p>
+
+                                                <div className="flex gap-3 mb-3">
+                                                    {/* [UBAHAN] Input Jam Order Masuk dengan limit min dan max */}
+                                                    <div className="flex-1">
+                                                        <label className="text-xs text-orange-200/70 font-mono mb-1 block">Jam Order Masuk</label>
+                                                        <input
+                                                            type="time"
+                                                            min="07:00"
+                                                            max="19:00"
+                                                            value={interruptTime}
+                                                            onChange={e => setInterruptTime(e.target.value)}
+                                                            style={{ ...neonInput, borderColor: 'rgba(249,115,22,0.3)', color: '#fdba74' }}
+                                                        />
+                                                    </div>
+                                                    <div className="flex-1">
+                                                        <label className="text-xs text-orange-200/70 font-mono mb-1 block">Tambah Paket</label>
+                                                        <button
+                                                            onClick={() => {
+                                                                const id = `Mendadak_${Date.now().toString().slice(-4)}`
+                                                                setNewOrders(prev => [...prev, { id, lat: -7.261884, lon: 112.739778, demand: 2, tw_start: 0, tw_end: 28800 }])
+                                                            }}
+                                                            className="w-full py-1.5 px-2 text-[10px] font-bold rounded bg-orange-500/20 text-orange-300 hover:bg-orange-500/30 transition-colors"
+                                                        >
+                                                            + Add Dummy Order
+                                                        </button>
+                                                    </div>
+                                                </div>
+
+                                                {/* Daftar Keranjang Order Baru */}
+                                                {newOrders.map((no, idx) => (
+                                                    <div key={idx} className="flex justify-between items-center text-[10px] text-slate-300 font-mono mb-2 p-1.5 bg-slate-900 rounded border border-orange-500/20">
+                                                        <span>{no.id} | Dem: {no.demand}</span>
+                                                        <span className="text-orange-400">Menunggu...</span>
+                                                    </div>
+                                                ))}
+
+                                                <button
+                                                    onClick={handleDynamicInjection}
+                                                    disabled={newOrders.length === 0 || loading}
+                                                    className={`w-full mt-2 py-2 text-xs font-bold rounded-lg transition-all shadow-lg ${newOrders.length > 0 && !loading
+                                                            ? 'bg-gradient-to-r from-orange-600 to-red-600 text-white hover:shadow-orange-500/20'
+                                                            : 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                                                        }`}
+                                                >
+                                                    {loading ? 'Injecting...' : '🚀 Inject Order & Re-Optimize'}
+                                                </button>
+                                            </div>
+                                        )}
+
                                         {/* Payload preview */}
                                         <div className="rounded-lg p-3 text-xs font-mono"
                                             style={{ background: 'rgba(168,85,247,0.06)', border: '1px solid rgba(168,85,247,0.15)' }}>
@@ -928,7 +1020,7 @@ export default function App() {
                                             <p className="text-purple-300">nodes: <span className="text-cyan-400">{nodes.length}</span></p>
                                             <p className="text-purple-300">vehicles: <span className="text-cyan-400">{numVehicles}</span></p>
                                             <p className="text-purple-300">capacity: <span className="text-cyan-400">{vehicleCapacity}</span></p>
-                                            <p className="text-purple-300">start_hour: <span className="text-cyan-400">{startHour}:00</span></p>
+                                            <p className="text-purple-300">start_time: <span className="text-cyan-400">{startTime}</span></p>
                                         </div>
 
                                         {/* Error banner */}
@@ -957,7 +1049,7 @@ export default function App() {
                                             ) : (
                                                 <span className="flex items-center justify-center gap-2">
                                                     <Brain size={16} />
-                                                    Run AI Optimization
+                                                    Run Initial Optimization
                                                 </span>
                                             )}
                                         </button>
@@ -967,7 +1059,7 @@ export default function App() {
                                                 onClick={handleReset}
                                             >
                                                 <RefreshCw size={11} />
-                                                Reset
+                                                Reset & Clear Map
                                             </button>
                                         )}
                                     </div>
@@ -997,7 +1089,7 @@ export default function App() {
                                                 <PackageCheck size={22} className="text-slate-600" />
                                             </div>
                                             <p className="text-xs text-slate-600 font-mono max-w-[200px] leading-relaxed">
-                                                Go to <span className="text-purple-400">Configuration</span> tab and press <span className="text-purple-400">"Run AI Optimization"</span> to generate routes.
+                                                Go to <span className="text-purple-400">Configuration</span> tab and press <span className="text-purple-400">"Run Initial Optimization"</span> to generate routes.
                                             </p>
                                         </div>
                                     )}
@@ -1013,6 +1105,20 @@ export default function App() {
                                     {/* Route data */}
                                     {result && !loading && (
                                         <div className="scroll-panel flex-1 overflow-y-auto px-4 pb-4">
+
+                                            {/* ===== INJECTION BANNER ===== */}
+                                            {result.metadata?.type === "MID-ROUTE INJECTION" && (
+                                                <div className="mb-3 p-3 rounded-lg border border-orange-500/30 bg-orange-500/10 fade-in-up">
+                                                    <div className="flex items-center gap-2 mb-1.5">
+                                                        <Zap size={14} className="text-orange-400" />
+                                                        <span className="text-xs font-bold font-mono text-orange-400 tracking-widest">DYNAMIC RE-ROUTING AKTIF</span>
+                                                    </div>
+                                                    <p className="text-xs font-mono text-orange-200/80 leading-relaxed">
+                                                        Sistem telah mencegat armada pada jam interupsi dan mendistribusikan pesanan baru ke kurir yang posisinya paling menguntungkan.
+                                                    </p>
+                                                </div>
+                                            )}
+
                                             {/* ===== SCORE BOARD PANEL ===== */}
                                             {result.metadata?.savings_rp != null && (
                                                 <div className="mb-3 rounded-lg overflow-hidden fade-in-up" style={{ border: '1px solid rgba(168,85,247,0.2)' }}>
@@ -1087,6 +1193,7 @@ export default function App() {
                                                     </div>
                                                 </div>
                                             )}
+
                                             {result.routes?.map((veh, i) => (
                                                 <VehicleRoutePanel key={veh.vehicle_id} vehicle={veh} colorIdx={i} />
                                             ))}

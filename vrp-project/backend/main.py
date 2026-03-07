@@ -12,13 +12,10 @@ import requests
 from datetime import datetime, timedelta
 import os
 from dotenv import load_dotenv
-
-# Database SQLite & UUID
 import sqlite3
 import uuid
 
-# ================= 1. INISIALISASI SERVER & KONFIGURASI =================
-
+# ================= 1. INISIALISASI =================
 load_dotenv()
 OWM_API_KEY = os.getenv("OPENWEATHER_API_KEY")
 RUN_ID = os.getenv("MLFLOW_RUN_ID")
@@ -27,72 +24,33 @@ if MLFLOW_TRACKING_URI:
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 OSRM_URL = "http://localhost:5000"
 
-app = FastAPI(title="AI VRP Backend", description="Engine Optimasi Rute Logistik")
+app = FastAPI(title="AI VRP Backend", description="Engine Optimasi Rute Logistik Full TDVRP")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# --- LOAD MODEL ML ---
-MODEL_PATH = f"runs:/{RUN_ID}/model_vrp_tegalsari_gpu"
 try:
-    if RUN_ID and "PASTE" not in RUN_ID:
-        print(f"📂 Memuat Model AI dari MLflow (Run ID: {RUN_ID})...")
-        model = mlflow.xgboost.load_model(MODEL_PATH)
-        print("✅ Model berhasil dimuat!")
-    else:
-        print("⚠️ RUN_ID belum diisi. AI akan menggunakan fallback.")
-        model = None
-except Exception as e:
-    print(f"❌ Gagal memuat model: {e}")
+    MODEL_PATH = f"runs:/{RUN_ID}/model_vrp_tegalsari_gpu"
+    model = mlflow.xgboost.load_model(MODEL_PATH) if (RUN_ID and "PASTE" not in RUN_ID) else None
+except Exception:
     model = None
 
-# ================= 2. DATABASE LOCAL (SQLITE CACHE) =================
-
+# ================= 2. DATABASE =================
 def init_db():
     conn = sqlite3.connect("locations.db", check_same_thread=False)
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS saved_locations (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            lat REAL NOT NULL,
-            lon REAL NOT NULL
-        )
-    """)
+    conn.execute("CREATE TABLE IF NOT EXISTS saved_locations (id TEXT PRIMARY KEY, name TEXT NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL)")
     conn.commit()
     return conn
-
 db_conn = init_db()
 
-def fetch_from_nominatim(query: str) -> Dict[str, Any] | None:
-    headers = {
-        "User-Agent": "VRP-Bachelor-Thesis/1.0",
-        "Accept-Language": "id,en;q=0.9",
-        "Referer": "http://localhost:5173",
-    }
-    url = "https://nominatim.openstreetmap.org/search"
-    params = {"q": query, "format": "json", "limit": 1, "addressdetails": 0}
+def fetch_from_nominatim(query: str):
+    headers = {"User-Agent": "VRP-Bachelor-Thesis/1.0", "Accept-Language": "id,en;q=0.9"}
     try:
-        response = requests.get(url, params=params, headers=headers, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            if data:
-                return {
-                    "name": query,
-                    "lat": float(data[0]["lat"]),
-                    "lon": float(data[0]["lon"])
-                }
-    except Exception as e:
-        print(f"Nominatim Error: {e}")
+        res = requests.get("https://nominatim.openstreetmap.org/search", params={"q": query, "format": "json", "limit": 1}, headers=headers, timeout=10)
+        if res.status_code == 200 and res.json():
+            return {"name": query, "lat": float(res.json()[0]["lat"]), "lon": float(res.json()[0]["lon"])}
+    except Exception: pass
     return None
 
-# ================= 3. DATA MODELS (SCHEMA JSON) =================
-
+# ================= 3. DATA MODELS =================
 class NodeInfo(BaseModel):
     id: str
     lat: float
@@ -105,433 +63,434 @@ class OptimizeRequest(BaseModel):
     nodes: List[NodeInfo]
     num_vehicles: int = 2
     vehicle_capacity: int = 15
-    start_hour: int = 8
+    start_time: str = "08:00" 
 
-class ReoptimizeRequest(BaseModel):
-    current_location: NodeInfo
-    unvisited_nodes: List[NodeInfo]
+class DynamicInjectionRequest(BaseModel):
+    original_nodes: List[NodeInfo]
+    original_routes: List[Dict[str, Any]]
     new_orders: List[NodeInfo]
-    vehicle_capacity: int = 15
-    num_vehicles: int = 1
-    current_hour: int
+    start_time: str       
+    interrupt_time: str   
+    num_vehicles: int
+    vehicle_capacity: int
 
-# ================= 4. GENERATORS & OSRM (Dari vrp_compare.py) =================
+# ================= 4. GENERATORS & CUACA =================
 
-def get_realtime_weather(lat: float, lon: float) -> Tuple[int, str]:
-    if not OWM_API_KEY: return 0, "No Key"
-    url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={OWM_API_KEY}&units=metric"
+def get_hourly_weather_forecast(lat: float, lon: float) -> Tuple[Dict[int, int], str]:
+    hourly_rain = {h: 0 for h in range(24)}
+    current_weather_desc = "Unknown"
+    if not OWM_API_KEY: return hourly_rain, "No Key"
+
     try:
-        r = requests.get(url, timeout=5)
-        if r.status_code == 200:
-            main_weather = r.json()['weather'][0]['main']
-            is_rain = 1 if main_weather in ['Rain', 'Drizzle', 'Thunderstorm'] else 0
-            return is_rain, main_weather
-        return 0, "Unknown"
-    except:
-        return 0, "Error"
+        r_curr = requests.get(f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={OWM_API_KEY}&units=metric", timeout=5)
+        if r_curr.status_code == 200:
+            current_weather_desc = r_curr.json()['weather'][0]['main']
+            curr_is_rain = 1 if current_weather_desc in ['Rain', 'Drizzle', 'Thunderstorm'] else 0
+            for h in range(24): hourly_rain[h] = curr_is_rain
 
-def get_osrm_table(nodes_data: List[Dict]) -> Tuple[List[List[int]], List[List[int]]]:
+        r_cast = requests.get(f"https://api.openweathermap.org/data/2.5/forecast?lat={lat}&lon={lon}&appid={OWM_API_KEY}&units=metric", timeout=5)
+        if r_cast.status_code == 200:
+            for item in r_cast.json().get('list', []):
+                dt_obj = datetime.strptime(item['dt_txt'], "%Y-%m-%d %H:%M:%S")
+                h = dt_obj.hour
+                rain_status = 1 if item['weather'][0]['main'] in ['Rain', 'Drizzle', 'Thunderstorm'] else 0
+                hourly_rain[h] = rain_status
+                hourly_rain[(h + 1) % 24] = rain_status
+                hourly_rain[(h + 2) % 24] = rain_status
+        return hourly_rain, current_weather_desc
+    except Exception as e:
+        return hourly_rain, "Error"
+
+def get_osrm_table(nodes_data: List[Dict]):
     coords = ";".join([f"{n['lon']},{n['lat']}" for n in nodes_data])
-    url = f"{OSRM_URL}/table/v1/driving/{coords}?annotations=duration,distance"
     n = len(nodes_data)
     try:
-        r = requests.get(url, timeout=10.0)
+        r = requests.get(f"{OSRM_URL}/table/v1/driving/{coords}?annotations=duration,distance", timeout=10.0)
         if r.status_code == 200:
             d = r.json()
-            distances = [[int(val) for val in row] for row in d['distances']]
-            durations = [[int(val) for val in row] for row in d['durations']]
-            return distances, durations
-    except Exception as e:
-        print(f"OSRM Table Error: {e}")
+            return [[int(v) for v in row] for row in d['distances']], [[int(v) for v in row] for row in d['durations']]
+    except Exception: pass
     return [[1000]*n for _ in range(n)], [[120]*n for _ in range(n)]
 
-def generate_hybrid_matrix(model: Any, nodes_data: List[Dict], hour: int, day: int, is_rain: int) -> np.ndarray:
-    num_nodes = len(nodes_data)
-    time_matrix = np.zeros((num_nodes, num_nodes), dtype=int)
-    
-    predict_payload = []
-    matrix_indices = []
+def generate_hybrid_matrix(model: Any, nodes_data: List[Dict], float_hour: float, day: int, is_rain: int):
+    n = len(nodes_data)
+    t_mat = np.zeros((n, n), dtype=int)
+    payload, indices = [], []
     dists, durs = get_osrm_table(nodes_data)
     
-    for i in range(num_nodes):
-        for j in range(num_nodes):
+    for i in range(n):
+        for j in range(n):
             if i == j: continue 
-            dist = dists[i][j]
-            dur_normal = durs[i][j]
-            if dist == 0: dist, dur_normal = 1000, 120
-            
-            row = {'origin_lat': nodes_data[i]['lat'], 'origin_lng': nodes_data[i]['lon'], 
-                   'dest_lat': nodes_data[j]['lat'], 'dest_lng': nodes_data[j]['lon'],
-                   'distance_meters': dist, 'duration_normal_sec': dur_normal,
-                   'hour_of_day': hour, 'day_code': day, 'is_rain': is_rain}
-            predict_payload.append(row)
-            matrix_indices.append((i, j))
+            dist, dur = dists[i][j], durs[i][j]
+            if dist == 0: dist, dur = 1000, 120
+            payload.append({'origin_lat': nodes_data[i]['lat'], 'origin_lng': nodes_data[i]['lon'], 'dest_lat': nodes_data[j]['lat'], 'dest_lng': nodes_data[j]['lon'], 'distance_meters': dist, 'duration_normal_sec': dur, 'hour_of_day': float_hour, 'day_code': day, 'is_rain': is_rain})
+            indices.append((i, j))
 
+    if payload and model:
+        df_pred = pd.DataFrame(payload)
+        preds = model.predict(df_pred[['origin_lat', 'origin_lng', 'dest_lat', 'dest_lng', 'distance_meters', 'duration_normal_sec', 'hour_of_day', 'day_code', 'is_rain']])
+        for idx, (r, c) in enumerate(indices):
+            t_mat[r][c] = max(0, int(round(preds[idx])))
+    else:
+        for idx, (r, c) in enumerate(indices):
+            t_mat[r][c] = payload[idx]['duration_normal_sec']
+    return t_mat
+
+def generate_tdvrp_matrices(model: Any, nodes_data: List[Dict], day: int, hourly_rain: Dict[int, int]) -> Dict[Tuple[int, int], np.ndarray]:
+    num_nodes = len(nodes_data)
+    dists, durs = get_osrm_table(nodes_data)
+    matrices = {}
+    predict_payload, indices = [], []
+    
+    for h in range(7, 20):
+        for m in [0, 30]:
+            if h == 19 and m == 30: continue 
+            matrices[(h, m)] = np.zeros((num_nodes, num_nodes), dtype=int)
+            is_rain_h = hourly_rain.get(h, 0) 
+            float_hour = h + (m / 60.0)
+            
+            for i in range(num_nodes):
+                for j in range(num_nodes):
+                    if i == j: continue
+                    dist, dur = dists[i][j], durs[i][j]
+                    if dist == 0: dist, dur = 1000, 120
+                    predict_payload.append({
+                        'origin_lat': nodes_data[i]['lat'], 'origin_lng': nodes_data[i]['lon'], 
+                        'dest_lat': nodes_data[j]['lat'], 'dest_lng': nodes_data[j]['lon'], 
+                        'distance_meters': dist, 'duration_normal_sec': dur, 
+                        'hour_of_day': float_hour, 'day_code': day, 'is_rain': is_rain_h
+                    })
+                    indices.append((h, m, i, j))
+                
     if predict_payload and model:
         df_pred = pd.DataFrame(predict_payload)
-        cols = ['origin_lat', 'origin_lng', 'dest_lat', 'dest_lng', 'distance_meters', 'duration_normal_sec', 'hour_of_day', 'day_code', 'is_rain']
-        predicted = model.predict(df_pred[cols])
-        
-        for idx, (r, c) in enumerate(matrix_indices):
-            # Simulasi Skripsi: Paksa kemacetan ganda (seperti di vrp_compare)
-            pred_sec = predicted[idx]
-            if 16 <= hour <= 18:
-                pred_sec *= 1
-            time_matrix[r][c] = max(0, int(round(pred_sec)))
+        preds = model.predict(df_pred[['origin_lat', 'origin_lng', 'dest_lat', 'dest_lng', 'distance_meters', 'duration_normal_sec', 'hour_of_day', 'day_code', 'is_rain']])
+        for idx, (h, m, i, j) in enumerate(indices):
+            matrices[(h, m)][i][j] = max(0, int(round(preds[idx])))
     else:
-        for idx, (r, c) in enumerate(matrix_indices):
-            time_matrix[r][c] = predict_payload[idx]['duration_normal_sec']
+        for idx, (h, m, i, j) in enumerate(indices):
+            matrices[(h, m)][i][j] = predict_payload[idx]['duration_normal_sec']
             
-    return time_matrix
+    return matrices
 
-def generate_distance_matrix(nodes_data: List[Dict]) -> Tuple[np.ndarray, np.ndarray]:
-    num_nodes = len(nodes_data)
-    dist_matrix = np.zeros((num_nodes, num_nodes), dtype=int)
-    normal_time_matrix = np.zeros((num_nodes, num_nodes), dtype=int)
-    
+def generate_distance_matrix(nodes_data: List[Dict]):
+    n = len(nodes_data)
+    d_mat, t_mat = np.zeros((n, n), dtype=int), np.zeros((n, n), dtype=int)
     dists, durs = get_osrm_table(nodes_data)
-    for i in range(num_nodes):
-        for j in range(num_nodes):
-            if i == j: continue 
-            dist = dists[i][j]
-            dur = durs[i][j]
-            if dist == 0: dist, dur = 1000, 120
-            
-            dist_matrix[i][j] = int(dist)
-            normal_time_matrix[i][j] = int(dur)
-            
-    return dist_matrix, normal_time_matrix
+    for i in range(n):
+        for j in range(n):
+            if i != j:
+                d_mat[i][j], t_mat[i][j] = int(dists[i][j] or 1000), int(durs[i][j] or 120)
+    return d_mat, t_mat
 
-def evaluate_actual_trip(routes: List[Dict], matrix_reality: np.ndarray, nodes_data: List[Dict], start_hour: int) -> Dict[str, Any]:
-    """
-    Mensimulasikan ulang rute yang sudah jadi menggunakan matrix_reality (Kondisi Macet Aktual).
-    Fungsi ini menghitung biaya bensin real dan total pelanggaran Time Window di lapangan.
-    """
-    total_fuel_rp = 0
-    total_late_count = 0
-    SERVICE_TIME_SEC = 120
+def evaluate_actual_trip(routes: List[Dict], tdvrp_matrices: Dict[Tuple[int, int], np.ndarray], nodes_data: List[Dict], start_time_str: str):
+    total_fuel, total_late = 0, 0
+    h_start, m_start = map(int, start_time_str.split(':'))
+    base_time = datetime.now().replace(hour=h_start, minute=m_start, second=0, microsecond=0)
     
-    base_time = datetime.now().replace(hour=start_hour, minute=0, second=0, microsecond=0)
-    
-    evaluated_routes = []
-    
+    evaluated = []
     for route in routes:
-        current_time = base_time
-        steps = route['steps']
+        curr_time = base_time
         new_steps = []
-        
-        for i in range(len(steps)):
-            step = steps[i]
-            idx_curr = step['node_index']
-            
-            # Hitung waktu perjalanan jika bukan origin
+        for i, step in enumerate(route['steps']):
+            idx = step['node_index']
             if i > 0:
-                idx_prev = steps[i-1]['node_index']
-                travel_time = matrix_reality[idx_prev][idx_curr]
-                current_time += timedelta(seconds=int(travel_time))
-                total_fuel_rp += int(travel_time * 5) # 5 Rupiah per detik perjalanan
+                prev_idx = route['steps'][i-1]['node_index']
+                current_hour = curr_time.hour
+                current_minute = curr_time.minute
+                clamped_hour = max(7, min(19, current_hour))
+                
+                if clamped_hour == 19:
+                    clamped_minute = 0
+                else:
+                    clamped_minute = 0 if current_minute < 30 else 30
+                
+                tt = tdvrp_matrices[(clamped_hour, clamped_minute)][prev_idx][idx]
+                curr_time += timedelta(seconds=int(tt))
+                total_fuel += int(tt * 5) 
             
-            # Cek Time Window
+            sec_since_start = (curr_time - base_time).total_seconds()
             is_late = False
-            seconds_since_start = (current_time - base_time).total_seconds()
-            
-            # Node 0 (Depot Akhir) tidak punya tw valid dalam list (bisa jadi out of bounds jika id=0). 
-            # Kita amankan:
-            if idx_curr < len(nodes_data) and idx_curr != 0:
-                tw_start = nodes_data[idx_curr]['tw_start']
-                tw_end = nodes_data[idx_curr]['tw_end']
-                
-                # Jika datang kepagian, tunggu
-                if seconds_since_start < tw_start:
-                    wait_sec = tw_start - seconds_since_start
-                    current_time += timedelta(seconds=int(wait_sec))
-                    seconds_since_start = tw_start
-                    
-                # Jika datang kemalaman, denda
-                if seconds_since_start > tw_end:
+            if idx < len(nodes_data) and idx != 0:
+                tws, twe = nodes_data[idx]['tw_start'], nodes_data[idx]['tw_end']
+                if sec_since_start < tws:
+                    curr_time += timedelta(seconds=int(tws - sec_since_start))
+                    sec_since_start = tws
+                if sec_since_start > twe:
                     is_late = True
-                    total_late_count += 1
+                    total_late += 1
             
-            # Update Step Info
-            new_step = step.copy()
-            new_step['arrival_time'] = current_time.strftime("%H:%M:%S")
-            new_step['is_late'] = is_late
-            new_steps.append(new_step)
+            s = step.copy()
+            s['arrival_time'] = curr_time.strftime("%H:%M:%S")
+            s['is_late'] = is_late
+            new_steps.append(s)
             
-            # Tambah service time (kecuali finish)
-            if idx_curr != 0:
-                current_time += timedelta(seconds=SERVICE_TIME_SEC)
-                
-        evaluated_routes.append({
-            "vehicle_id": route["vehicle_id"],
-            "steps": new_steps
-        })
-        
-    penalty_rp = total_late_count * 20000
+            if idx != 0: curr_time += timedelta(seconds=120)
+            
+        evaluated.append({"vehicle_id": route["vehicle_id"], "steps": new_steps})
+    return {"fuel_rp": total_fuel, "penalty_rp": total_late * 20000, "total_rp": total_fuel + (total_late * 20000), "late_count": total_late, "routes": evaluated}
+
+# ================= 5. SOLVER =================
+def solve_vrp_modular(cost_matrix: np.ndarray, time_matrix: np.ndarray, nodes_data: List[Dict], start_time_str: str, num_vehicles: int, vehicle_capacity: int, cost_rupiah: np.ndarray, starts: List[int] = None, ends: List[int] = None):
+    if starts is None: starts = [0] * num_vehicles
+    if ends is None: ends = [0] * num_vehicles
     
-    return {
-        "fuel_rp": total_fuel_rp,
-        "penalty_rp": penalty_rp,
-        "total_rp": total_fuel_rp + penalty_rp,
-        "late_count": total_late_count,
-        "routes": evaluated_routes
-    }
-
-
-# ================= 5. SOLVER MODULAR (MENGEMBALIKAN JSON FRONTEND) =================
-
-def solve_vrp_modular(cost_matrix: np.ndarray, time_matrix_for_constraint: np.ndarray, nodes_data: List[Dict], start_hour: int, num_vehicles: int, vehicle_capacity: int, cost_rupiah_matrix: np.ndarray) -> Dict[str, Any]:
-    """
-    Fungsi Solver yang fleksibel, menggabungkan logika evaluasi vrp_compare menjadi JSON yang utuh untuk frontend.
-    cost_matrix = matrix yang mau diminimalkan solver (Jarak/Waktu AI).
-    time_matrix_for_constraint = constraint time window (Waktu Normal/Waktu AI).
-    cost_rupiah_matrix = cost metics per-hop yang akan dikonversi ke rupiah secara murni (mengabaikan unit cost_matrix solver internal).
-    """
-    SERVICE_TIME_SEC = 120
-    
-    data = {}
-    data['cost_matrix'] = cost_matrix
-    data['time_matrix'] = time_matrix_for_constraint
-    data['demands'] = [n['demand'] for n in nodes_data] 
-    data['time_windows'] = [(n['tw_start'], n['tw_end']) for n in nodes_data]
-    data['vehicle_capacities'] = [vehicle_capacity] * num_vehicles
-    data['num_vehicles'] = num_vehicles
-    data['depot'] = 0
-
-    manager = pywrapcp.RoutingIndexManager(len(cost_matrix), num_vehicles, 0)
+    manager = pywrapcp.RoutingIndexManager(len(cost_matrix), num_vehicles, starts, ends)
     routing = pywrapcp.RoutingModel(manager)
 
-    # 1. SET COST PADA SOLVER
-    def cost_callback(from_index, to_index):
-        from_node = manager.IndexToNode(from_index)
-        to_node = manager.IndexToNode(to_index)
-        return int(data['cost_matrix'][from_node][to_node])
-    transit_callback_index = routing.RegisterTransitCallback(cost_callback)
-    routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
+    def cost_cb(f, t): return int(cost_matrix[manager.IndexToNode(f)][manager.IndexToNode(t)])
+    routing.SetArcCostEvaluatorOfAllVehicles(routing.RegisterTransitCallback(cost_cb))
 
-    # 2. SET CONSTRAINT TIME 
-    def time_callback(from_index, to_index):
-        from_node = manager.IndexToNode(from_index)
-        to_node = manager.IndexToNode(to_index)
-        val = int(data['time_matrix'][from_node][to_node])
-        if to_node != 0: val += SERVICE_TIME_SEC
-        return val
-    time_callback_index = routing.RegisterTransitCallback(time_callback)
-    routing.AddDimension(time_callback_index, 36000, 86400, False, 'Time')
-    time_dimension = routing.GetDimensionOrDie('Time')
+    def time_cb(f, t):
+        v = int(time_matrix[manager.IndexToNode(f)][manager.IndexToNode(t)])
+        return v + (0 if manager.IndexToNode(t) in ends else 120)
+    time_dim_idx = routing.RegisterTransitCallback(time_cb)
+    routing.AddDimension(time_dim_idx, 36000, 86400, False, 'Time')
+    time_dim = routing.GetDimensionOrDie('Time')
     
-    for loc_idx, (start, end) in enumerate(data['time_windows']):
-        index = manager.NodeToIndex(loc_idx)
-        time_dimension.CumulVar(index).SetMin(start)
-        # Soft bound: denda point yang besar agar tetap mencoba patuh jika memungkinkan
-        time_dimension.SetCumulVarSoftUpperBound(index, end, 100)
+    for i, n in enumerate(nodes_data):
+        idx = manager.NodeToIndex(i)
+        time_dim.CumulVar(idx).SetMin(n['tw_start'])
+        time_dim.SetCumulVarSoftUpperBound(idx, n['tw_end'], 100)
 
-    # 3. SET CONSTRAINT CAPACITY
-    def demand_callback(from_index):
-        from_node = manager.IndexToNode(from_index)
-        return data['demands'][from_node]
-    demand_callback_index = routing.RegisterUnaryTransitCallback(demand_callback)
-    routing.AddDimension(demand_callback_index, 0, vehicle_capacity, False, 'Capacity')
+    def demand_cb(f): return nodes_data[manager.IndexToNode(f)]['demand']
+    routing.AddDimension(routing.RegisterUnaryTransitCallback(demand_cb), 0, vehicle_capacity, False, 'Capacity')
 
-    # 4. SOLVE DENGAN METAHEURISTIC
-    search_parameters = pywrapcp.DefaultRoutingSearchParameters()
-    search_parameters.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
-    search_parameters.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
-    search_parameters.time_limit.seconds = 5 
+    p = pywrapcp.DefaultRoutingSearchParameters()
+    p.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.AUTOMATIC
+    p.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
+    p.time_limit.seconds = 3 
     
-    solution = routing.SolveWithParameters(search_parameters)
-
-    # 5. PARSING OUT - EXTRAKSI JSON LAYAK FRONTEND + HITUNG TRUE RUPIAH
-    if not solution:
-        return {"status": "FAILED", "message": "Solusi rute tidak ditemukan (Constraint terlalu ketat/Overload)."}
+    sol = routing.SolveWithParameters(p)
+    if not sol: return {"status": "FAILED"}
         
-    base_time = datetime.now().replace(hour=start_hour, minute=0, second=0, microsecond=0)
-    result_routes = []
+    h, m = map(int, start_time_str.split(':'))
+    base_time = datetime.now().replace(hour=h, minute=m, second=0, microsecond=0)
+    routes, cost = [], 0 
     
-    total_cost_rupiah = 0 # Biaya Bahan Bakar Aktual
-    
-    for vehicle_id in range(num_vehicles):
-        index = routing.Start(vehicle_id)
-        route_steps = []
-        
-        while not routing.IsEnd(index):
-            node_idx = manager.IndexToNode(index)
-            # Dapatkan Waktu Kedatangan Simulasinya
-            time_var = solution.Value(time_dimension.CumulVar(index))
-            arrival_time = base_time + timedelta(seconds=time_var)
+    for v in range(num_vehicles):
+        idx = routing.Start(v)
+        steps = []
+        while not routing.IsEnd(idx):
+            n_idx = manager.IndexToNode(idx)
+            arr_t = base_time + timedelta(seconds=sol.Value(time_dim.CumulVar(idx)))
+            dem = nodes_data[n_idx]['demand']
+            task = "START" if n_idx in starts else ("PICKUP" if dem > 0 else ("DROP" if dem < 0 else "PASS"))
+            steps.append({"node_index": n_idx, "location_id": nodes_data[n_idx]['id'], "task": task, "demand": dem, "arrival_time": arr_t.strftime("%H:%M:%S")})
+            prev, idx = manager.IndexToNode(idx), sol.Value(routing.NextVar(idx))
+            if prev != manager.IndexToNode(idx): cost += (int(cost_rupiah[prev][manager.IndexToNode(idx)]) * 5)
             
-            demand_val = data['demands'][node_idx]
-            task = "START" if node_idx == 0 else ("PICKUP" if demand_val > 0 else ("DROP" if demand_val < 0 else "PASS"))
-            
-            route_steps.append({
-                "node_index": node_idx,
-                "location_id": nodes_data[node_idx]['id'],
-                "task": task,
-                "demand": demand_val,
-                "arrival_time": arrival_time.strftime("%H:%M:%S")
-            })
-            
-            previous_index = index
-            index = solution.Value(routing.NextVar(index))
-            
-            # Hitung Bensin Pure Real (Perdetik x 5 Rupiah) 
-            prev_node = manager.IndexToNode(previous_index)
-            next_node = manager.IndexToNode(index)
-            segment_real_sec = int(cost_rupiah_matrix[prev_node][next_node])
-            if prev_node != next_node: # Avoid depot->depot cost if route is empty
-                total_cost_rupiah += (segment_real_sec * 5)
-            
-        # Tambahkan Depot Akhir
-        node_idx = manager.IndexToNode(index)
-        time_var = solution.Value(time_dimension.CumulVar(index))
-        arrival_time = base_time + timedelta(seconds=time_var)
-        route_steps.append({
-            "node_index": node_idx,
-            "location_id": "0_Depot_Akhir",
-            "task": "FINISH",
-            "demand": 0,
-            "arrival_time": arrival_time.strftime("%H:%M:%S")
-        })
-        
-        # Omit empty routes generated by solver
-        if len(route_steps) > 2:
-            result_routes.append({
-                "vehicle_id": len(result_routes) + 1,
-                "steps": route_steps
-            })
+        arr_t = base_time + timedelta(seconds=sol.Value(time_dim.CumulVar(idx)))
+        steps.append({"node_index": manager.IndexToNode(idx), "location_id": "0_Depot_Akhir", "task": "FINISH", "demand": 0, "arrival_time": arr_t.strftime("%H:%M:%S")})
+        routes.append({"vehicle_id": v + 1, "steps": steps})
 
-    return {
-        "status": "SUCCESS",
-        "objective_value": total_cost_rupiah,
-        "routes": result_routes
-    }
+    return {"status": "SUCCESS", "objective_value": cost, "routes": routes}
 
-# ================= 6. REST API ENDPOINTS =================
-
+# ================= 6. REST API =================
 @app.post("/optimize")
 def optimize_route(req: OptimizeRequest):
-    nodes_data = [{'id': n.id, 'lat': n.lat, 'lon': n.lon, 'demand': n.demand, 'tw_start': n.tw_start, 'tw_end': n.tw_end} for n in req.nodes]
-    is_rain, w_desc = get_realtime_weather(nodes_data[0]['lat'], nodes_data[0]['lon'])
-    day_of_week = datetime.now().weekday() # Menggunakan Hari Realita
+    sh, sm = map(int, req.start_time.split(':'))
+    if not (7 <= sh <= 19): raise HTTPException(status_code=400, detail="Operasional diluar jam kerja! Harap masukkan jam antara 07:00 hingga 19:00.")
 
-    # Matrix A: AI Time Prediction (Sadar Macet)
-    matrix_ai = generate_hybrid_matrix(model, nodes_data, req.start_hour, day_of_week, is_rain)
+    nodes = [{'id': n.id, 'lat': n.lat, 'lon': n.lon, 'demand': n.demand, 'tw_start': n.tw_start, 'tw_end': n.tw_end} for n in req.nodes]
     
-    # Matrix B: Distance (Jarak Murni / Buta Macet)
-    matrix_dist, matrix_normal_time = generate_distance_matrix(nodes_data)
-
-    # 👉 SKENARIO A (AI Optimization)
-    # solver_cost: AI, constraint_time: AI, rupiah_evaluator: AI (Detik Prediksi * 5)
-    result_ai = solve_vrp_modular(matrix_ai, matrix_ai, nodes_data, req.start_hour, req.num_vehicles, req.vehicle_capacity, matrix_ai)
+    hourly_rain, w_desc = get_hourly_weather_forecast(nodes[0]['lat'], nodes[0]['lon'])
+    current_hour_rain = hourly_rain.get(sh, 0)
+    float_hour = sh + (sm / 60.0) 
     
-    if result_ai["status"] == "FAILED":
-        raise HTTPException(status_code=400, detail=result_ai["message"])
+    m_ai = generate_hybrid_matrix(model, nodes, float_hour, datetime.now().weekday(), current_hour_rain)
+    m_tdvrp_ai = generate_tdvrp_matrices(model, nodes, datetime.now().weekday(), hourly_rain)
+    m_dist, m_time = generate_distance_matrix(nodes)
 
-    # 👉 SKENARIO B (Traditional/Distance Optimization)
-    # solver_cost: Distance, constraint_time: Normal, rupiah_evaluator: Normal (Detik Asli * 5)
-    result_benchmark = solve_vrp_modular(matrix_dist, matrix_normal_time, nodes_data, req.start_hour, req.num_vehicles, req.vehicle_capacity, matrix_normal_time)
+    res_ai = solve_vrp_modular(m_ai, m_ai, nodes, req.start_time, req.num_vehicles, req.vehicle_capacity, m_ai)
+    if res_ai["status"] == "FAILED": raise HTTPException(status_code=400, detail="Solusi tidak ditemukan")
+    res_bench = solve_vrp_modular(m_dist, m_time, nodes, req.start_time, req.num_vehicles, req.vehicle_capacity, m_time)
 
-    # 1. Evaluasi Ulang Rute Memakai Kondisi Realita (matrix_ai) + Denda Lateness!
-    eval_ai = evaluate_actual_trip(result_ai["routes"], matrix_ai, nodes_data, req.start_hour)
-    eval_bench = evaluate_actual_trip(result_benchmark["routes"], matrix_ai, nodes_data, req.start_hour)
+    e_ai = evaluate_actual_trip(res_ai["routes"], m_tdvrp_ai, nodes, req.start_time)
+    res_ai["routes"] = [r for r in e_ai["routes"] if len(r["steps"]) > 2]
+    res_ai["objective_value"] = e_ai["total_rp"]
 
-    # Tindih return values dengan rute yg sudah dievaluasi time windownya secara riil
-    result_ai["routes"] = eval_ai["routes"]
-    result_ai["objective_value"] = eval_ai["total_rp"]
+    sav, e_bnc = 0, {"total_rp": 0, "penalty_rp": 0, "late_count": 0}
+    if res_bench["status"] == "SUCCESS":
+        e_bnc = evaluate_actual_trip(res_bench["routes"], m_tdvrp_ai, nodes, req.start_time)
+        sav = e_bnc["total_rp"] - e_ai["total_rp"]
 
-    # Hitung Selisih
-    savings = 0
-    if result_benchmark["status"] == "SUCCESS":
-        savings = eval_bench["total_rp"] - eval_ai["total_rp"]
-
-    # Metadata Respons
-    result_ai["metadata"] = {
-        "weather": w_desc,
-        "is_rain": is_rain,
-        "ai_cost_rp": eval_ai["total_rp"],
-        "ai_penalty_rp": eval_ai["penalty_rp"],
-        "ai_late_count": eval_ai["late_count"],
-        "benchmark_cost_rp": eval_bench["total_rp"] if result_benchmark["status"] == "SUCCESS" else 0,
-        "bench_penalty_rp": eval_bench["penalty_rp"],
-        "bench_late_count": eval_bench["late_count"],
-        "savings_rp": savings
+    res_ai["metadata"] = {
+        "weather": w_desc, "is_rain": current_hour_rain, 
+        "ai_cost_rp": e_ai["total_rp"], "ai_penalty_rp": e_ai["penalty_rp"], "ai_late_count": e_ai["late_count"], 
+        "benchmark_cost_rp": e_bnc["total_rp"], "bench_penalty_rp": e_bnc["penalty_rp"], "bench_late_count": e_bnc["late_count"], 
+        "savings_rp": sav
     }
+    return res_ai
 
-    return result_ai
-
-@app.post("/reoptimize")
-def reoptimize_route(req: ReoptimizeRequest):
-    nodes_data = [{
-        'id': req.current_location.id, 'lat': req.current_location.lat, 'lon': req.current_location.lon, 
-        'demand': 0, 'tw_start': req.current_location.tw_start, 'tw_end': req.current_location.tw_end
-    }]
-    for n in req.unvisited_nodes + req.new_orders:
-        nodes_data.append({
-            'id': n.id, 'lat': n.lat, 'lon': n.lon, 
-            'demand': n.demand, 'tw_start': n.tw_start, 'tw_end': n.tw_end
-        })
-
-    is_rain, w_desc = get_realtime_weather(nodes_data[0]['lat'], nodes_data[0]['lon'])
-    day_of_week = datetime.now().weekday()
-
-    # Regenerate Matrices untuk Reoptimisasi
-    matrix_ai = generate_hybrid_matrix(model, nodes_data, req.current_hour, day_of_week, is_rain)
-    matrix_dist, matrix_normal_time = generate_distance_matrix(nodes_data)
-
-    result_ai = solve_vrp_modular(matrix_ai, matrix_ai, nodes_data, req.current_hour, req.num_vehicles, req.vehicle_capacity, matrix_ai)
+@app.post("/dynamic_injection")
+def dynamic_injection(req: DynamicInjectionRequest):
+    sh, sm = map(int, req.start_time.split(':'))
+    ih, im = map(int, req.interrupt_time.split(':'))
     
-    if result_ai["status"] == "FAILED":
-        raise HTTPException(status_code=400, detail="Tidak dapat menemukan rute re-optimasi yang valid.")
+    if not (7 <= sh <= 19) or not (7 <= ih <= 19):
+        raise HTTPException(status_code=400, detail="Operasional diluar jam kerja!")
+
+    depot = req.original_nodes[0]
+    b_time = datetime.now().replace(hour=sh, minute=sm, second=0, microsecond=0)
+    i_time = datetime.now().replace(hour=ih, minute=im, second=0, microsecond=0)
+
+    # Ambil prakiraan cuaca
+    hourly_rain, w_desc = get_hourly_weather_forecast(depot.lat, depot.lon)
+    current_hour_rain = hourly_rain.get(ih, 0)
+    float_hour_inter = ih + (im / 60.0)
+
+    # =========================================================================
+    # PARALLEL UNIVERSE A: KURIR MENGGUNAKAN AI SEJAK PAGI
+    # =========================================================================
+    visited_ids_ai = [depot.id]
+    past_routes_ai, last_loc_by_vid_ai = {}, {}
+    
+    for route in req.original_routes:
+        vid = route["vehicle_id"]
+        l_id = depot.id
+        past_steps = []
+        for step in route['steps']:
+            if step['location_id'] == "0_Depot_Akhir": continue 
+            arr_dt = b_time.replace(hour=int(step['arrival_time'].split(":")[0]), minute=int(step['arrival_time'].split(":")[1]), second=int(step['arrival_time'].split(":")[2]))
+            if arr_dt <= i_time:
+                visited_ids_ai.append(step['location_id'])
+                l_id = step['location_id']
+                past_steps.append(step.copy())
+            else: break 
+        past_routes_ai[vid] = past_steps
+        last_loc_by_vid_ai[vid] = next((n for n in req.original_nodes if n.id == l_id), depot)
+
+    unvisited_ai = [n for n in req.original_nodes if n.id not in visited_ids_ai]
+    k_nodes_ai = [n for n in req.original_nodes if n.id in set([n.id for n in last_loc_by_vid_ai.values()])]
+    
+    active_ai = k_nodes_ai + unvisited_ai + req.new_orders
+    if depot.id not in [n.id for n in active_ai]: active_ai.append(depot) 
+    a_dicts_ai = [{'id': n.id, 'lat': n.lat, 'lon': n.lon, 'demand': n.demand, 'tw_start': n.tw_start, 'tw_end': n.tw_end} for n in active_ai]
+    d_idx_ai = next(i for i, n in enumerate(a_dicts_ai) if n['id'] == depot.id)
+    
+    starts_ai = []
+    for v in range(1, req.num_vehicles + 1):
+        if v in last_loc_by_vid_ai: starts_ai.append(next(i for i, a in enumerate(a_dicts_ai) if a['id'] == last_loc_by_vid_ai[v].id))
+        else: starts_ai.append(d_idx_ai)
+    ends_ai = [d_idx_ai] * req.num_vehicles
+    
+    m_ai = generate_hybrid_matrix(model, a_dicts_ai, float_hour_inter, datetime.now().weekday(), current_hour_rain)
+    res_ai = solve_vrp_modular(m_ai, m_ai, a_dicts_ai, req.interrupt_time, req.num_vehicles, req.vehicle_capacity, m_ai, starts=starts_ai, ends=ends_ai)
+    if res_ai["status"] == "FAILED": raise HTTPException(status_code=400, detail="Re-routing Gagal")
+
+    # =========================================================================
+    # PARALLEL UNIVERSE B: KURIR MENGGUNAKAN STANDAR SEJAK PAGI
+    # Simulasikan apa yang terjadi kalau kurir tidak pernah pakai AI dari jam 8
+    # =========================================================================
+    orig_dicts = [{'id': n.id, 'lat': n.lat, 'lon': n.lon, 'demand': n.demand, 'tw_start': n.tw_start, 'tw_end': n.tw_end} for n in req.original_nodes]
+    m_dist_orig, m_time_orig = generate_distance_matrix(orig_dicts)
+    res_bench_morning = solve_vrp_modular(m_dist_orig, m_time_orig, orig_dicts, req.start_time, req.num_vehicles, req.vehicle_capacity, m_time_orig)
+    
+    visited_ids_bench = [depot.id]
+    past_routes_bench, last_loc_by_vid_bench = {}, {}
+
+    if res_bench_morning["status"] == "SUCCESS":
+        m_tdvrp_orig = generate_tdvrp_matrices(model, orig_dicts, datetime.now().weekday(), hourly_rain)
+        # Evaluasi rute standar ini pakai kondisi nyata macet, untuk tau kapan dia sampai
+        eval_bench_morning = evaluate_actual_trip(res_bench_morning["routes"], m_tdvrp_orig, orig_dicts, req.start_time)
         
-    result_benchmark = solve_vrp_modular(matrix_dist, matrix_normal_time, nodes_data, req.current_hour, req.num_vehicles, req.vehicle_capacity, matrix_normal_time)
+        # Potong rute standar tepat pada jam order masuk (10:00)
+        for route in eval_bench_morning["routes"]:
+            vid = route["vehicle_id"]
+            l_id = depot.id
+            past_steps = []
+            for step in route['steps']:
+                if step['location_id'] == "0_Depot_Akhir": continue 
+                arr_dt = b_time.replace(hour=int(step['arrival_time'].split(":")[0]), minute=int(step['arrival_time'].split(":")[1]), second=int(step['arrival_time'].split(":")[2]))
+                if arr_dt <= i_time:
+                    visited_ids_bench.append(step['location_id'])
+                    l_id = step['location_id']
+                    past_steps.append(step.copy())
+                else: break 
+            past_routes_bench[vid] = past_steps
+            last_loc_by_vid_bench[vid] = next((n for n in req.original_nodes if n.id == l_id), depot)
 
-    # Evaluasi Realita
-    eval_ai = evaluate_actual_trip(result_ai["routes"], matrix_ai, nodes_data, req.current_hour)
-    eval_bench = evaluate_actual_trip(result_benchmark["routes"], matrix_ai, nodes_data, req.current_hour)
+    # Buat keranjang tugas sisa untuk Kurir Standard
+    unvisited_bench = [n for n in req.original_nodes if n.id not in visited_ids_bench]
+    k_nodes_bench = [n for n in req.original_nodes if n.id in set([n.id for n in last_loc_by_vid_bench.values()])]
+    
+    active_bench = k_nodes_bench + unvisited_bench + req.new_orders
+    if depot.id not in [n.id for n in active_bench]: active_bench.append(depot) 
+    a_dicts_bench = [{'id': n.id, 'lat': n.lat, 'lon': n.lon, 'demand': n.demand, 'tw_start': n.tw_start, 'tw_end': n.tw_end} for n in active_bench]
+    d_idx_bench = next(i for i, n in enumerate(a_dicts_bench) if n['id'] == depot.id)
+    
+    starts_bench = []
+    for v in range(1, req.num_vehicles + 1):
+        if v in last_loc_by_vid_bench: starts_bench.append(next(i for i, a in enumerate(a_dicts_bench) if a['id'] == last_loc_by_vid_bench[v].id))
+        else: starts_bench.append(d_idx_bench)
+    ends_bench = [d_idx_bench] * req.num_vehicles
 
-    # Tindih rute & cost
-    result_ai["routes"] = eval_ai["routes"]
-    result_ai["objective_value"] = eval_ai["total_rp"]
+    m_dist_bench, m_time_bench = generate_distance_matrix(a_dicts_bench)
+    res_bench_afternoon = solve_vrp_modular(m_dist_bench, m_time_bench, a_dicts_bench, req.interrupt_time, req.num_vehicles, req.vehicle_capacity, m_time_bench, starts=starts_bench, ends=ends_bench)
 
-    savings = 0
-    if result_benchmark["status"] == "SUCCESS":
-        savings = eval_bench["total_rp"] - eval_ai["total_rp"]
+    # =========================================================================
+    # PENJAHITAN DAN SIMULASI AKHIR (MEMBANDINGKAN 2 UNIVERSE)
+    # =========================================================================
+    all_nodes = req.original_nodes + req.new_orders
+    all_nodes_dicts = [{'id': n.id, 'lat': n.lat, 'lon': n.lon, 'demand': n.demand, 'tw_start': n.tw_start, 'tw_end': n.tw_end} for n in all_nodes]
+    m_tdvrp_full = generate_tdvrp_matrices(model, all_nodes_dicts, datetime.now().weekday(), hourly_rain)
 
-    result_ai["metadata"] = {
-        "weather": w_desc, 
-        "is_rain": is_rain,
-        "type": "Dynamic Mid-Route Update",
-        "ai_cost_rp": eval_ai["total_rp"],
-        "ai_penalty_rp": eval_ai["penalty_rp"],
-        "ai_late_count": eval_ai["late_count"],
-        "benchmark_cost_rp": eval_bench["total_rp"] if result_benchmark["status"] == "SUCCESS" else 0,
-        "bench_penalty_rp": eval_bench["penalty_rp"],
-        "bench_late_count": eval_bench["late_count"],
-        "savings_rp": savings
+    def stitch_and_fix(solve_res, past_routes_map):
+        stitched = []
+        if solve_res["status"] != "SUCCESS": return stitched
+        for new_route in solve_res["routes"]:
+            vid = new_route["vehicle_id"]
+            p_steps = past_routes_map.get(vid, [])
+            n_steps = new_route["steps"]
+            combined = p_steps + n_steps[1:] if (p_steps and n_steps and n_steps[0]['location_id'] == p_steps[-1]['location_id']) else p_steps + n_steps
+                
+            if len(combined) > 2:
+                new_steps = []
+                for s in combined:
+                    new_s = s.copy()
+                    if new_s['location_id'] == "0_Depot_Akhir":
+                        new_s['node_index'] = 0
+                    else:
+                        new_s['node_index'] = next(i for i, n in enumerate(all_nodes_dicts) if n['id'] == new_s['location_id'])
+                    new_steps.append(new_s)
+                stitched.append({"vehicle_id": vid, "steps": new_steps})
+        return stitched
+
+    # Evaluasi Universe AI
+    final_routes_ai = stitch_and_fix(res_ai, past_routes_ai)
+    eval_ai = evaluate_actual_trip(final_routes_ai, m_tdvrp_full, all_nodes_dicts, req.start_time)
+    
+    # Evaluasi Universe Standard
+    final_routes_bench = stitch_and_fix(res_bench_afternoon, past_routes_bench)
+    if len(final_routes_bench) > 0:
+        eval_bench = evaluate_actual_trip(final_routes_bench, m_tdvrp_full, all_nodes_dicts, req.start_time)
+        sav = eval_bench["total_rp"] - eval_ai["total_rp"]
+    else:
+        eval_bench = {"total_rp": 0, "penalty_rp": 0, "late_count": 0}
+        sav = 0
+            
+    return {
+        "status": "SUCCESS", "objective_value": eval_ai["total_rp"], "routes": eval_ai["routes"], 
+        "metadata": {
+            "type": "MID-ROUTE INJECTION", "weather": w_desc, "is_rain": current_hour_rain, 
+            "ai_cost_rp": eval_ai["total_rp"], "ai_penalty_rp": eval_ai["penalty_rp"], "ai_late_count": eval_ai["late_count"],
+            "benchmark_cost_rp": eval_bench["total_rp"], "bench_penalty_rp": eval_bench["penalty_rp"], "bench_late_count": eval_bench["late_count"], "savings_rp": sav
+        }
     }
-    return result_ai
 
 @app.get("/search_location")
 def search_location(q: str):
     cursor = db_conn.cursor()
-    cursor.execute("SELECT id, name, lat, lon FROM saved_locations WHERE name LIKE ?", (f"%{q}%",))
-    row = cursor.fetchone()
-    if row:
-        return {"source": "local_cache", "id": row[0], "name": row[1], "lat": row[2], "lon": row[3]}
-        
-    osm_data = fetch_from_nominatim(q)
-    if not osm_data:
-        raise HTTPException(status_code=404, detail="Lokasi tidak ditemukan di database dan OpenStreetMap")
-        
+    row = cursor.execute("SELECT id, name, lat, lon FROM saved_locations WHERE name LIKE ?", (f"%{q}%",)).fetchone()
+    if row: return {"source": "local_cache", "id": row[0], "name": row[1], "lat": row[2], "lon": row[3]}
+    osm = fetch_from_nominatim(q)
+    if not osm: raise HTTPException(status_code=404, detail="Lokasi tidak ditemukan")
     new_id = str(uuid.uuid4())
-    cursor.execute("INSERT INTO saved_locations (id, name, lat, lon) VALUES (?, ?, ?, ?)",
-                   (new_id, q, osm_data['lat'], osm_data['lon']))
+    cursor.execute("INSERT INTO saved_locations VALUES (?, ?, ?, ?)", (new_id, q, osm['lat'], osm['lon']))
     db_conn.commit()
-    return {"source": "osm_api", "id": new_id, "name": q, "lat": osm_data["lat"], "lon": osm_data["lon"]}
+    return {"source": "osm", "id": new_id, "name": q, "lat": osm["lat"], "lon": osm["lon"]}
 
 @app.get("/saved_locations")
 def saved_locations():
-    cursor = db_conn.cursor()
-    cursor.execute("SELECT id, name, lat, lon FROM saved_locations")
-    rows = cursor.fetchall()
-    return [{"id": r[0], "name": r[1], "lat": r[2], "lon": r[3]} for r in rows]
+    return [{"id": r[0], "name": r[1], "lat": r[2], "lon": r[3]} for r in db_conn.cursor().execute("SELECT id, name, lat, lon FROM saved_locations").fetchall()]

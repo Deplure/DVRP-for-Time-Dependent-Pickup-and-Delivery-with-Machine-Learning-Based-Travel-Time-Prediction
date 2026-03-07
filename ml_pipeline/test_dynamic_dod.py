@@ -173,7 +173,9 @@ def run_dod_simulation(percentage, model, is_rain):
     
     # --- PHASE 0: SETUP ---
     start_time_ph1 = datetime.now().replace(hour=8, minute=0, second=0, microsecond=0)
-    interrupt_time = datetime.now().replace(hour=10, minute=0, second=0, microsecond=0)
+    
+    # 🔴 GANTI DISINI: Ubah jam 10:00 menjadi 08:30 
+    interrupt_time = datetime.now().replace(hour=8, minute=30, second=0, microsecond=0)
     
     offline_nodes, online_nodes = split_dod_orders(percentage)
     print(f"\n[📦] FASE 1: INITIAL ROUTING (08:00 WIB)")
@@ -190,7 +192,7 @@ def run_dod_simulation(percentage, model, is_rain):
         print("   ❌ Gagal menemukan initial routing.")
         return
         
-    # --- PHASE 2: TIME SLOT INTERRUPTION (10:00 WIB) ---
+    # --- PHASE 2: TIME SLOT INTERRUPTION (08:30 WIB) ---
     print(f"\n[🚨] FASE 2: TIME SLOT INTERRUPTION ({interrupt_time.strftime('%H:%M WIB')})")
     print(f"   TERDETEKSI {len(online_nodes)} ORDERAN BARU MASUK! Memicu Re-Optimisasi...")
     
@@ -202,17 +204,15 @@ def run_dod_simulation(percentage, model, is_rain):
     # 1. Unvisited dari Offline Nodes 
     unvisited_nodes = [n for n in offline_nodes if n['id'] not in visited_ids]
     
-    # 2. Sisipan Start/Depot Saat Ini (Titik Kurir Berada di 10:00)
-    # Filter unik karena banyak kurir mungkin lagi rebahan di Depot (0)
+    # 2. Sisipan Start/Depot Saat Ini (Titik Kurir Berada di 08:30)
     unique_start_loc_ids = list(set(vehicle_latest_ids))
     kurir_nodes = [n for n in offline_nodes if n['id'] in unique_start_loc_ids]
     
     # 3. Kumpulan Total Node Fase 3 (Lokasi Terakhir Kurir + Unvisited + Online Baru)
     active_nodes_ph3 = kurir_nodes + unvisited_nodes + online_nodes
     
-    # Selipkan Depot Asli kembali ke active_nodes_ph3 (jika belum ada) agarEnds valid
+    # Selipkan Depot Asli kembali ke active_nodes_ph3 (jika belum ada) agar Ends valid
     if nodes_data[0] not in active_nodes_ph3:
-        # Taruh di belakang biar indexnya nggak ganggu posisi
         active_nodes_ph3.append(nodes_data[0]) 
 
     depot_asli_idx = active_nodes_ph3.index(nodes_data[0])
@@ -222,22 +222,22 @@ def run_dod_simulation(percentage, model, is_rain):
     # --- PHASE 3: RE-OPTIMIZATION ---
     print(f"\n[🔄] FASE 3: RE-OPTIMIZATION VRP (Mulai dari {interrupt_time.strftime('%H:%M WIB')})")
     
-    mat_time_ph3 = generate_hybrid_matrix(model, active_nodes_ph3, 10, interrupt_time.weekday(), is_rain)
+    # Memanggil model AI untuk prediksi kemacetan di jam 08:30
+    mat_time_ph3 = generate_hybrid_matrix(model, active_nodes_ph3, 8, interrupt_time.weekday(), is_rain)
     
-    # Petakan Index Start Kendaraan pada array active_nodes_ph3
     starts_ph3 = []
     for loc_id in vehicle_latest_ids:
         idx = next((i for i, node in enumerate(active_nodes_ph3) if node['id'] == loc_id), depot_asli_idx)
         starts_ph3.append(idx)
         
-    ends_ph3 = [depot_asli_idx] * NUM_VEHICLES # Semua harus pulang kandang ke Depot 0 (JNE)
+    ends_ph3 = [depot_asli_idx] * NUM_VEHICLES 
 
     routes_ph3 = solve_vrp_dynamic(mat_time_ph3, mat_time_ph3, active_nodes_ph3, NUM_VEHICLES, starts_ph3, ends_ph3)
     
     if not routes_ph3:
         print("   ❌ Re-Routing GAGAL/OVERLOAD (Kapasitas & Waktu Tidak Cukup Terhadap Order Baru).")
     else:
-        print("   ✅ Solusi Re-Routing 10:00 WIB Terselesaikan Terhadap Semua Sisa & Paket Baru!")
+        print(f"   ✅ Solusi Re-Routing {interrupt_time.strftime('%H:%M WIB')} Terselesaikan Terhadap Semua Sisa & Paket Baru!")
         
         # --- WASIT HASIL AKHIR BIAYA (EVALUASI) ---
         print("\n🏆 EVALUASI TOTAL RUTE TERAKHIR & DENDA:")
@@ -258,7 +258,7 @@ def run_dod_simulation(percentage, model, is_rain):
         print(f"💰 SCOREBOARD [DOD {percentage}%]")
         print(f"   Bahan Bakar & Durasi Lanjut: Rp {biaya_bensin:,}")
         print(f"   Denda Keterlambatan        : Rp {biaya_denda:,}")
-        print(f"   TOTAL COST SEJAK 10:00     : Rp {biaya_bensin + biaya_denda:,}")
+        print(f"   TOTAL COST SEJAK {interrupt_time.strftime('%H:%M')}     : Rp {biaya_bensin + biaya_denda:,}")
     
     print("="*60 + "\n")
 

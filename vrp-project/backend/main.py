@@ -230,7 +230,7 @@ def evaluate_actual_trip(routes: List[Dict], tdvrp_matrices: Dict[Tuple[int, int
         evaluated.append({"vehicle_id": route["vehicle_id"], "steps": new_steps})
     return {"fuel_rp": total_fuel, "penalty_rp": total_late * 20000, "total_rp": total_fuel + (total_late * 20000), "late_count": total_late, "routes": evaluated}
 
-# ================= 5. SOLVER =================
+# ================= 5. SOLVER OR-TOOLS =================
 def solve_vrp_modular(cost_matrix: np.ndarray, time_matrix: np.ndarray, nodes_data: List[Dict], start_time_str: str, num_vehicles: int, vehicle_capacity: int, cost_rupiah: np.ndarray, starts: List[int] = None, ends: List[int] = None):
     if starts is None: starts = [0] * num_vehicles
     if ends is None: ends = [0] * num_vehicles
@@ -286,7 +286,66 @@ def solve_vrp_modular(cost_matrix: np.ndarray, time_matrix: np.ndarray, nodes_da
 
     return {"status": "SUCCESS", "objective_value": cost, "routes": routes}
 
-# ================= 6. REST API =================
+# ================= 6. FITUR BARU: SUCCESSIVE APPROXIMATION (Melihat Masa Depan) =================
+def solve_tdvrp_with_look_ahead(nodes_data: List[Dict], start_time_str: str, num_vehicles: int, vehicle_capacity: int, tdvrp_matrices: Dict[Tuple[int, int], np.ndarray], initial_matrix: np.ndarray, cost_rupiah: np.ndarray, starts: List[int] = None, ends: List[int] = None):
+    current_matrix = np.copy(initial_matrix)
+    
+    # KUNCI PERBAIKAN 1: Mekanisme WASIT (Global Best Tracker)
+    best_res_overall = None
+    best_cost_overall = float('inf') 
+    
+    MAX_ITERATION = 3 # AI akan melakukan iterasi pencarian maksimum 3 kali putaran
+
+    for iteration in range(MAX_ITERATION):
+        # 1. OR-Tools menebak rute menggunakan Matriks Hybrid saat ini
+        res = solve_vrp_modular(current_matrix, current_matrix, nodes_data, start_time_str, num_vehicles, vehicle_capacity, cost_rupiah, starts, ends)
+        
+        if res["status"] == "FAILED":
+            if best_res_overall is None: best_res_overall = res
+            break
+            
+        # 2. WASIT MENGEVALUASI BIAYA AKTUAL DARI RUTE TEBAKAN INI
+        eval_trip = evaluate_actual_trip(res["routes"], tdvrp_matrices, nodes_data, start_time_str)
+        actual_cost = eval_trip["total_rp"]
+        
+        # 3. JIKA RUTE INI LEBIH MURAH DARI PUTARAN SEBELUMNYA, SIMPAN SEBAGAI JUARA!
+        if actual_cost < best_cost_overall:
+            best_cost_overall = actual_cost
+            best_res_overall = res
+        
+        # 4. Membuat Matriks Hybrid Baru berdasarkan jam kedatangan nyata (Reality Check)
+        new_hybrid_matrix = np.copy(current_matrix)
+        matrix_changed = False
+        
+        for route in eval_trip["routes"]:
+            for step in route["steps"]:
+                if step["location_id"] == "0_Depot_Akhir": continue
+                
+                node_idx = step["node_index"]
+                arr_time_str = step["arrival_time"]
+                arr_h, arr_m, _ = map(int, arr_time_str.split(':'))
+                
+                arr_h = max(7, min(19, arr_h))
+                if arr_h == 19:
+                    arr_m = 0
+                else:
+                    arr_m = 0 if arr_m < 30 else 30
+                    
+                target_matrix = tdvrp_matrices[(arr_h, arr_m)]
+                
+                if not np.array_equal(new_hybrid_matrix[node_idx], target_matrix[node_idx]):
+                    new_hybrid_matrix[node_idx] = target_matrix[node_idx]
+                    matrix_changed = True
+                    
+        # Jika matriks tidak ada yang berubah, berarti rute sudah mentok/stabil (Konvergen)
+        if not matrix_changed:
+            break
+            
+        current_matrix = new_hybrid_matrix
+        
+    return best_res_overall
+
+# ================= 7. REST API =================
 @app.post("/optimize")
 def optimize_route(req: OptimizeRequest):
     sh, sm = map(int, req.start_time.split(':'))
@@ -302,8 +361,9 @@ def optimize_route(req: OptimizeRequest):
     m_tdvrp_ai = generate_tdvrp_matrices(model, nodes, datetime.now().weekday(), hourly_rain)
     m_dist, m_time = generate_distance_matrix(nodes)
 
-    res_ai = solve_vrp_modular(m_ai, m_ai, nodes, req.start_time, req.num_vehicles, req.vehicle_capacity, m_ai)
+    res_ai = solve_tdvrp_with_look_ahead(nodes, req.start_time, req.num_vehicles, req.vehicle_capacity, m_tdvrp_ai, m_ai, m_ai)
     if res_ai["status"] == "FAILED": raise HTTPException(status_code=400, detail="Solusi tidak ditemukan")
+    
     res_bench = solve_vrp_modular(m_dist, m_time, nodes, req.start_time, req.num_vehicles, req.vehicle_capacity, m_time)
 
     e_ai = evaluate_actual_trip(res_ai["routes"], m_tdvrp_ai, nodes, req.start_time)
@@ -335,7 +395,9 @@ def dynamic_injection(req: DynamicInjectionRequest):
     b_time = datetime.now().replace(hour=sh, minute=sm, second=0, microsecond=0)
     i_time = datetime.now().replace(hour=ih, minute=im, second=0, microsecond=0)
 
-    # Ambil prakiraan cuaca
+    # KUNCI PERBAIKAN 2: Time Shift Offset (Agar tidak kena penalti palsu)
+    offset_sec = int((i_time - b_time).total_seconds())
+
     hourly_rain, w_desc = get_hourly_weather_forecast(depot.lat, depot.lon)
     current_hour_rain = hourly_rain.get(ih, 0)
     float_hour_inter = ih + (im / 60.0)
@@ -366,7 +428,11 @@ def dynamic_injection(req: DynamicInjectionRequest):
     
     active_ai = k_nodes_ai + unvisited_ai + req.new_orders
     if depot.id not in [n.id for n in active_ai]: active_ai.append(depot) 
-    a_dicts_ai = [{'id': n.id, 'lat': n.lat, 'lon': n.lon, 'demand': n.demand, 'tw_start': n.tw_start, 'tw_end': n.tw_end} for n in active_ai]
+    
+    # SHIFTING: Kurangi batas TW dengan Offset Detik Interupsi
+    a_dicts_ai = [{'id': n.id, 'lat': n.lat, 'lon': n.lon, 'demand': n.demand, 
+                   'tw_start': max(0, n.tw_start - offset_sec), 
+                   'tw_end': max(0, n.tw_end - offset_sec)} for n in active_ai]
     d_idx_ai = next(i for i, n in enumerate(a_dicts_ai) if n['id'] == depot.id)
     
     starts_ai = []
@@ -376,12 +442,13 @@ def dynamic_injection(req: DynamicInjectionRequest):
     ends_ai = [d_idx_ai] * req.num_vehicles
     
     m_ai = generate_hybrid_matrix(model, a_dicts_ai, float_hour_inter, datetime.now().weekday(), current_hour_rain)
-    res_ai = solve_vrp_modular(m_ai, m_ai, a_dicts_ai, req.interrupt_time, req.num_vehicles, req.vehicle_capacity, m_ai, starts=starts_ai, ends=ends_ai)
+    m_tdvrp_ai_inter = generate_tdvrp_matrices(model, a_dicts_ai, datetime.now().weekday(), hourly_rain)
+    
+    res_ai = solve_tdvrp_with_look_ahead(a_dicts_ai, req.interrupt_time, req.num_vehicles, req.vehicle_capacity, m_tdvrp_ai_inter, m_ai, m_ai, starts=starts_ai, ends=ends_ai)
     if res_ai["status"] == "FAILED": raise HTTPException(status_code=400, detail="Re-routing Gagal")
 
     # =========================================================================
     # PARALLEL UNIVERSE B: KURIR MENGGUNAKAN STANDAR SEJAK PAGI
-    # Simulasikan apa yang terjadi kalau kurir tidak pernah pakai AI dari jam 8
     # =========================================================================
     orig_dicts = [{'id': n.id, 'lat': n.lat, 'lon': n.lon, 'demand': n.demand, 'tw_start': n.tw_start, 'tw_end': n.tw_end} for n in req.original_nodes]
     m_dist_orig, m_time_orig = generate_distance_matrix(orig_dicts)
@@ -392,10 +459,8 @@ def dynamic_injection(req: DynamicInjectionRequest):
 
     if res_bench_morning["status"] == "SUCCESS":
         m_tdvrp_orig = generate_tdvrp_matrices(model, orig_dicts, datetime.now().weekday(), hourly_rain)
-        # Evaluasi rute standar ini pakai kondisi nyata macet, untuk tau kapan dia sampai
         eval_bench_morning = evaluate_actual_trip(res_bench_morning["routes"], m_tdvrp_orig, orig_dicts, req.start_time)
         
-        # Potong rute standar tepat pada jam order masuk (10:00)
         for route in eval_bench_morning["routes"]:
             vid = route["vehicle_id"]
             l_id = depot.id
@@ -411,13 +476,16 @@ def dynamic_injection(req: DynamicInjectionRequest):
             past_routes_bench[vid] = past_steps
             last_loc_by_vid_bench[vid] = next((n for n in req.original_nodes if n.id == l_id), depot)
 
-    # Buat keranjang tugas sisa untuk Kurir Standard
     unvisited_bench = [n for n in req.original_nodes if n.id not in visited_ids_bench]
     k_nodes_bench = [n for n in req.original_nodes if n.id in set([n.id for n in last_loc_by_vid_bench.values()])]
     
     active_bench = k_nodes_bench + unvisited_bench + req.new_orders
     if depot.id not in [n.id for n in active_bench]: active_bench.append(depot) 
-    a_dicts_bench = [{'id': n.id, 'lat': n.lat, 'lon': n.lon, 'demand': n.demand, 'tw_start': n.tw_start, 'tw_end': n.tw_end} for n in active_bench]
+    
+    # SHIFTING: Kurangi batas TW dengan Offset Detik Interupsi
+    a_dicts_bench = [{'id': n.id, 'lat': n.lat, 'lon': n.lon, 'demand': n.demand, 
+                      'tw_start': max(0, n.tw_start - offset_sec), 
+                      'tw_end': max(0, n.tw_end - offset_sec)} for n in active_bench]
     d_idx_bench = next(i for i, n in enumerate(a_dicts_bench) if n['id'] == depot.id)
     
     starts_bench = []
@@ -457,11 +525,9 @@ def dynamic_injection(req: DynamicInjectionRequest):
                 stitched.append({"vehicle_id": vid, "steps": new_steps})
         return stitched
 
-    # Evaluasi Universe AI
     final_routes_ai = stitch_and_fix(res_ai, past_routes_ai)
     eval_ai = evaluate_actual_trip(final_routes_ai, m_tdvrp_full, all_nodes_dicts, req.start_time)
     
-    # Evaluasi Universe Standard
     final_routes_bench = stitch_and_fix(res_bench_afternoon, past_routes_bench)
     if len(final_routes_bench) > 0:
         eval_bench = evaluate_actual_trip(final_routes_bench, m_tdvrp_full, all_nodes_dicts, req.start_time)

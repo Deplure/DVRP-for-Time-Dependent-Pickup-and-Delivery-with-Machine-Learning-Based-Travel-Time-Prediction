@@ -231,7 +231,7 @@ def evaluate_actual_trip(routes: List[Dict], tdvrp_matrices: Dict[Tuple[int, int
     return {"fuel_rp": total_fuel, "penalty_rp": total_late * 20000, "total_rp": total_fuel + (total_late * 20000), "late_count": total_late, "routes": evaluated}
 
 # ================= 5. SOLVER OR-TOOLS =================
-def solve_vrp_modular(cost_matrix: np.ndarray, time_matrix: np.ndarray, nodes_data: List[Dict], start_time_str: str, num_vehicles: int, vehicle_capacity: int, cost_rupiah: np.ndarray, starts: List[int] = None, ends: List[int] = None):
+def solve_vrp_modular(cost_matrix: np.ndarray, time_matrix: np.ndarray, nodes_data: List[Dict], start_time_str: str, num_vehicles: int, vehicle_capacity: int, cost_rupiah: np.ndarray, starts: List[int] = None, ends: List[int] = None, start_delays: List[int] = None):
     if starts is None: starts = [0] * num_vehicles
     if ends is None: ends = [0] * num_vehicles
     
@@ -248,6 +248,11 @@ def solve_vrp_modular(cost_matrix: np.ndarray, time_matrix: np.ndarray, nodes_da
     routing.AddDimension(time_dim_idx, 36000, 86400, False, 'Time')
     time_dim = routing.GetDimensionOrDie('Time')
     
+    if start_delays:
+        for v in range(num_vehicles):
+            idx = routing.Start(v)
+            time_dim.CumulVar(idx).SetMin(start_delays[v])
+            
     for i, n in enumerate(nodes_data):
         idx = manager.NodeToIndex(i)
         time_dim.CumulVar(idx).SetMin(n['tw_start'])
@@ -287,33 +292,26 @@ def solve_vrp_modular(cost_matrix: np.ndarray, time_matrix: np.ndarray, nodes_da
     return {"status": "SUCCESS", "objective_value": cost, "routes": routes}
 
 # ================= 6. FITUR BARU: SUCCESSIVE APPROXIMATION (Melihat Masa Depan) =================
-def solve_tdvrp_with_look_ahead(nodes_data: List[Dict], start_time_str: str, num_vehicles: int, vehicle_capacity: int, tdvrp_matrices: Dict[Tuple[int, int], np.ndarray], initial_matrix: np.ndarray, cost_rupiah: np.ndarray, starts: List[int] = None, ends: List[int] = None):
+def solve_tdvrp_with_look_ahead(nodes_data: List[Dict], start_time_str: str, num_vehicles: int, vehicle_capacity: int, tdvrp_matrices: Dict[Tuple[int, int], np.ndarray], initial_matrix: np.ndarray, cost_rupiah: np.ndarray, starts: List[int] = None, ends: List[int] = None, start_delays: List[int] = None):
     current_matrix = np.copy(initial_matrix)
-    
-    # KUNCI PERBAIKAN 1: Mekanisme WASIT (Global Best Tracker)
     best_res_overall = None
     best_cost_overall = float('inf') 
-    
-    MAX_ITERATION = 3 # AI akan melakukan iterasi pencarian maksimum 3 kali putaran
+    MAX_ITERATION = 3 
 
     for iteration in range(MAX_ITERATION):
-        # 1. OR-Tools menebak rute menggunakan Matriks Hybrid saat ini
-        res = solve_vrp_modular(current_matrix, current_matrix, nodes_data, start_time_str, num_vehicles, vehicle_capacity, cost_rupiah, starts, ends)
+        res = solve_vrp_modular(current_matrix, current_matrix, nodes_data, start_time_str, num_vehicles, vehicle_capacity, cost_rupiah, starts, ends, start_delays)
         
         if res["status"] == "FAILED":
             if best_res_overall is None: best_res_overall = res
             break
             
-        # 2. WASIT MENGEVALUASI BIAYA AKTUAL DARI RUTE TEBAKAN INI
         eval_trip = evaluate_actual_trip(res["routes"], tdvrp_matrices, nodes_data, start_time_str)
         actual_cost = eval_trip["total_rp"]
         
-        # 3. JIKA RUTE INI LEBIH MURAH DARI PUTARAN SEBELUMNYA, SIMPAN SEBAGAI JUARA!
         if actual_cost < best_cost_overall:
             best_cost_overall = actual_cost
             best_res_overall = res
         
-        # 4. Membuat Matriks Hybrid Baru berdasarkan jam kedatangan nyata (Reality Check)
         new_hybrid_matrix = np.copy(current_matrix)
         matrix_changed = False
         
@@ -322,9 +320,7 @@ def solve_tdvrp_with_look_ahead(nodes_data: List[Dict], start_time_str: str, num
                 if step["location_id"] == "0_Depot_Akhir": continue
                 
                 node_idx = step["node_index"]
-                arr_time_str = step["arrival_time"]
-                arr_h, arr_m, _ = map(int, arr_time_str.split(':'))
-                
+                arr_h, arr_m, _ = map(int, step["arrival_time"].split(':'))
                 arr_h = max(7, min(19, arr_h))
                 if arr_h == 19:
                     arr_m = 0
@@ -337,13 +333,82 @@ def solve_tdvrp_with_look_ahead(nodes_data: List[Dict], start_time_str: str, num
                     new_hybrid_matrix[node_idx] = target_matrix[node_idx]
                     matrix_changed = True
                     
-        # Jika matriks tidak ada yang berubah, berarti rute sudah mentok/stabil (Konvergen)
-        if not matrix_changed:
-            break
-            
+        if not matrix_changed: break
         current_matrix = new_hybrid_matrix
         
     return best_res_overall
+
+# ================= FUNGSI BANTUAN HISTORIS RUTE =================
+def build_past_routes(routes, original_nodes, b_time, i_time, depot_id):
+    visited_ids = [depot_id]
+    past_routes_map = {}
+    last_loc_map = {}
+    delays_map = {}
+    
+    for route in routes:
+        vid = route["vehicle_id"]
+        l_id = depot_id
+        past_steps = []
+        delay_sec = 0
+        
+        for step in route['steps']:
+            loc_id = depot_id if step['location_id'] == "0_Depot_Akhir" else step['location_id']
+            arr_h, arr_m, arr_s = map(int, step['arrival_time'].split(":"))
+            arr_dt = b_time.replace(hour=arr_h, minute=arr_m, second=arr_s)
+            
+            service_time = 0 if loc_id == depot_id else 120
+            
+            if arr_dt > i_time:
+                visited_ids.append(loc_id)
+                l_id = loc_id
+                past_steps.append(step.copy())
+                delay_sec = int((arr_dt - i_time).total_seconds()) + service_time
+                break
+            elif arr_dt + timedelta(seconds=service_time) > i_time:
+                visited_ids.append(loc_id)
+                l_id = loc_id
+                past_steps.append(step.copy())
+                delay_sec = int(((arr_dt + timedelta(seconds=service_time)) - i_time).total_seconds())
+                break
+            else:
+                visited_ids.append(loc_id)
+                l_id = loc_id
+                past_steps.append(step.copy())
+                
+        past_routes_map[vid] = past_steps
+        last_loc_map[vid] = next((n for n in original_nodes if n.id == l_id), original_nodes[0])
+        delays_map[vid] = delay_sec
+        
+    return visited_ids, past_routes_map, last_loc_map, delays_map
+
+def stitch_and_fix(solve_res, past_routes_map, all_nodes_dicts):
+    stitched = []
+    if solve_res["status"] != "SUCCESS": return stitched
+    for new_route in solve_res["routes"]:
+        vid = new_route["vehicle_id"]
+        p_steps = past_routes_map.get(vid, [])
+        n_steps = new_route["steps"]
+        
+        if p_steps and n_steps:
+            p_last = p_steps[-1]['location_id']
+            n_first = n_steps[0]['location_id']
+            # Cek apakah titik sambungannya sama (agar tidak duplikat)
+            is_same = (p_last == n_first) or (p_last == "0_Depot_Akhir" and n_first == all_nodes_dicts[0]['id']) or (p_last == all_nodes_dicts[0]['id'] and n_first == "0_Depot_Akhir")
+            combined = p_steps + n_steps[1:] if is_same else p_steps + n_steps
+        else:
+            combined = p_steps + n_steps
+            
+        if len(combined) > 2:
+            new_steps = []
+            for s in combined:
+                new_s = s.copy()
+                if new_s['location_id'] == "0_Depot_Akhir":
+                    new_s['node_index'] = 0
+                else:
+                    new_s['node_index'] = next((i for i, n in enumerate(all_nodes_dicts) if n['id'] == new_s['location_id']), 0)
+                new_steps.append(new_s)
+            stitched.append({"vehicle_id": vid, "steps": new_steps})
+    return stitched
 
 # ================= 7. REST API =================
 @app.post("/optimize")
@@ -394,8 +459,6 @@ def dynamic_injection(req: DynamicInjectionRequest):
     depot = req.original_nodes[0]
     b_time = datetime.now().replace(hour=sh, minute=sm, second=0, microsecond=0)
     i_time = datetime.now().replace(hour=ih, minute=im, second=0, microsecond=0)
-
-    # KUNCI PERBAIKAN 2: Time Shift Offset (Agar tidak kena penalti palsu)
     offset_sec = int((i_time - b_time).total_seconds())
 
     hourly_rain, w_desc = get_hourly_weather_forecast(depot.lat, depot.lon)
@@ -405,46 +468,24 @@ def dynamic_injection(req: DynamicInjectionRequest):
     # =========================================================================
     # PARALLEL UNIVERSE A: KURIR MENGGUNAKAN AI SEJAK PAGI
     # =========================================================================
-    visited_ids_ai = [depot.id]
-    past_routes_ai, last_loc_by_vid_ai = {}, {}
-    
-    for route in req.original_routes:
-        vid = route["vehicle_id"]
-        l_id = depot.id
-        past_steps = []
-        for step in route['steps']:
-            if step['location_id'] == "0_Depot_Akhir": continue 
-            arr_dt = b_time.replace(hour=int(step['arrival_time'].split(":")[0]), minute=int(step['arrival_time'].split(":")[1]), second=int(step['arrival_time'].split(":")[2]))
-            if arr_dt <= i_time:
-                visited_ids_ai.append(step['location_id'])
-                l_id = step['location_id']
-                past_steps.append(step.copy())
-            else: break 
-        past_routes_ai[vid] = past_steps
-        last_loc_by_vid_ai[vid] = next((n for n in req.original_nodes if n.id == l_id), depot)
+    visited_ids_ai, past_routes_ai, last_loc_by_vid_ai, vehicle_delays_ai = build_past_routes(req.original_routes, req.original_nodes, b_time, i_time, depot.id)
 
     unvisited_ai = [n for n in req.original_nodes if n.id not in visited_ids_ai]
     k_nodes_ai = [n for n in req.original_nodes if n.id in set([n.id for n in last_loc_by_vid_ai.values()])]
-    
     active_ai = k_nodes_ai + unvisited_ai + req.new_orders
     if depot.id not in [n.id for n in active_ai]: active_ai.append(depot) 
     
-    # SHIFTING: Kurangi batas TW dengan Offset Detik Interupsi
-    a_dicts_ai = [{'id': n.id, 'lat': n.lat, 'lon': n.lon, 'demand': n.demand, 
-                   'tw_start': max(0, n.tw_start - offset_sec), 
-                   'tw_end': max(0, n.tw_end - offset_sec)} for n in active_ai]
+    a_dicts_ai = [{'id': n.id, 'lat': n.lat, 'lon': n.lon, 'demand': n.demand, 'tw_start': max(0, n.tw_start - offset_sec), 'tw_end': max(0, n.tw_end - offset_sec)} for n in active_ai]
     d_idx_ai = next(i for i, n in enumerate(a_dicts_ai) if n['id'] == depot.id)
     
-    starts_ai = []
-    for v in range(1, req.num_vehicles + 1):
-        if v in last_loc_by_vid_ai: starts_ai.append(next(i for i, a in enumerate(a_dicts_ai) if a['id'] == last_loc_by_vid_ai[v].id))
-        else: starts_ai.append(d_idx_ai)
+    starts_ai = [next(i for i, a in enumerate(a_dicts_ai) if a['id'] == last_loc_by_vid_ai[v].id) if v in last_loc_by_vid_ai else d_idx_ai for v in range(1, req.num_vehicles + 1)]
+    start_delays_ai = [vehicle_delays_ai.get(v, 0) for v in range(1, req.num_vehicles + 1)]
     ends_ai = [d_idx_ai] * req.num_vehicles
     
     m_ai = generate_hybrid_matrix(model, a_dicts_ai, float_hour_inter, datetime.now().weekday(), current_hour_rain)
     m_tdvrp_ai_inter = generate_tdvrp_matrices(model, a_dicts_ai, datetime.now().weekday(), hourly_rain)
     
-    res_ai = solve_tdvrp_with_look_ahead(a_dicts_ai, req.interrupt_time, req.num_vehicles, req.vehicle_capacity, m_tdvrp_ai_inter, m_ai, m_ai, starts=starts_ai, ends=ends_ai)
+    res_ai = solve_tdvrp_with_look_ahead(a_dicts_ai, req.interrupt_time, req.num_vehicles, req.vehicle_capacity, m_tdvrp_ai_inter, m_ai, m_ai, starts=starts_ai, ends=ends_ai, start_delays=start_delays_ai)
     if res_ai["status"] == "FAILED": raise HTTPException(status_code=400, detail="Re-routing Gagal")
 
     # =========================================================================
@@ -453,49 +494,28 @@ def dynamic_injection(req: DynamicInjectionRequest):
     orig_dicts = [{'id': n.id, 'lat': n.lat, 'lon': n.lon, 'demand': n.demand, 'tw_start': n.tw_start, 'tw_end': n.tw_end} for n in req.original_nodes]
     m_dist_orig, m_time_orig = generate_distance_matrix(orig_dicts)
     res_bench_morning = solve_vrp_modular(m_dist_orig, m_time_orig, orig_dicts, req.start_time, req.num_vehicles, req.vehicle_capacity, m_time_orig)
-    
-    visited_ids_bench = [depot.id]
-    past_routes_bench, last_loc_by_vid_bench = {}, {}
 
     if res_bench_morning["status"] == "SUCCESS":
         m_tdvrp_orig = generate_tdvrp_matrices(model, orig_dicts, datetime.now().weekday(), hourly_rain)
         eval_bench_morning = evaluate_actual_trip(res_bench_morning["routes"], m_tdvrp_orig, orig_dicts, req.start_time)
-        
-        for route in eval_bench_morning["routes"]:
-            vid = route["vehicle_id"]
-            l_id = depot.id
-            past_steps = []
-            for step in route['steps']:
-                if step['location_id'] == "0_Depot_Akhir": continue 
-                arr_dt = b_time.replace(hour=int(step['arrival_time'].split(":")[0]), minute=int(step['arrival_time'].split(":")[1]), second=int(step['arrival_time'].split(":")[2]))
-                if arr_dt <= i_time:
-                    visited_ids_bench.append(step['location_id'])
-                    l_id = step['location_id']
-                    past_steps.append(step.copy())
-                else: break 
-            past_routes_bench[vid] = past_steps
-            last_loc_by_vid_bench[vid] = next((n for n in req.original_nodes if n.id == l_id), depot)
+        visited_ids_bench, past_routes_bench, last_loc_by_vid_bench, vehicle_delays_bench = build_past_routes(eval_bench_morning["routes"], req.original_nodes, b_time, i_time, depot.id)
+    else:
+        visited_ids_bench, past_routes_bench, last_loc_by_vid_bench, vehicle_delays_bench = [depot.id], {}, {}, {}
 
     unvisited_bench = [n for n in req.original_nodes if n.id not in visited_ids_bench]
     k_nodes_bench = [n for n in req.original_nodes if n.id in set([n.id for n in last_loc_by_vid_bench.values()])]
-    
     active_bench = k_nodes_bench + unvisited_bench + req.new_orders
     if depot.id not in [n.id for n in active_bench]: active_bench.append(depot) 
     
-    # SHIFTING: Kurangi batas TW dengan Offset Detik Interupsi
-    a_dicts_bench = [{'id': n.id, 'lat': n.lat, 'lon': n.lon, 'demand': n.demand, 
-                      'tw_start': max(0, n.tw_start - offset_sec), 
-                      'tw_end': max(0, n.tw_end - offset_sec)} for n in active_bench]
+    a_dicts_bench = [{'id': n.id, 'lat': n.lat, 'lon': n.lon, 'demand': n.demand, 'tw_start': max(0, n.tw_start - offset_sec), 'tw_end': max(0, n.tw_end - offset_sec)} for n in active_bench]
     d_idx_bench = next(i for i, n in enumerate(a_dicts_bench) if n['id'] == depot.id)
     
-    starts_bench = []
-    for v in range(1, req.num_vehicles + 1):
-        if v in last_loc_by_vid_bench: starts_bench.append(next(i for i, a in enumerate(a_dicts_bench) if a['id'] == last_loc_by_vid_bench[v].id))
-        else: starts_bench.append(d_idx_bench)
+    starts_bench = [next(i for i, a in enumerate(a_dicts_bench) if a['id'] == last_loc_by_vid_bench[v].id) if v in last_loc_by_vid_bench else d_idx_bench for v in range(1, req.num_vehicles + 1)]
+    start_delays_bench = [vehicle_delays_bench.get(v, 0) for v in range(1, req.num_vehicles + 1)]
     ends_bench = [d_idx_bench] * req.num_vehicles
 
     m_dist_bench, m_time_bench = generate_distance_matrix(a_dicts_bench)
-    res_bench_afternoon = solve_vrp_modular(m_dist_bench, m_time_bench, a_dicts_bench, req.interrupt_time, req.num_vehicles, req.vehicle_capacity, m_time_bench, starts=starts_bench, ends=ends_bench)
+    res_bench_afternoon = solve_vrp_modular(m_dist_bench, m_time_bench, a_dicts_bench, req.interrupt_time, req.num_vehicles, req.vehicle_capacity, m_time_bench, starts=starts_bench, ends=ends_bench, start_delays=start_delays_bench)
 
     # =========================================================================
     # PENJAHITAN DAN SIMULASI AKHIR (MEMBANDINGKAN 2 UNIVERSE)
@@ -504,31 +524,10 @@ def dynamic_injection(req: DynamicInjectionRequest):
     all_nodes_dicts = [{'id': n.id, 'lat': n.lat, 'lon': n.lon, 'demand': n.demand, 'tw_start': n.tw_start, 'tw_end': n.tw_end} for n in all_nodes]
     m_tdvrp_full = generate_tdvrp_matrices(model, all_nodes_dicts, datetime.now().weekday(), hourly_rain)
 
-    def stitch_and_fix(solve_res, past_routes_map):
-        stitched = []
-        if solve_res["status"] != "SUCCESS": return stitched
-        for new_route in solve_res["routes"]:
-            vid = new_route["vehicle_id"]
-            p_steps = past_routes_map.get(vid, [])
-            n_steps = new_route["steps"]
-            combined = p_steps + n_steps[1:] if (p_steps and n_steps and n_steps[0]['location_id'] == p_steps[-1]['location_id']) else p_steps + n_steps
-                
-            if len(combined) > 2:
-                new_steps = []
-                for s in combined:
-                    new_s = s.copy()
-                    if new_s['location_id'] == "0_Depot_Akhir":
-                        new_s['node_index'] = 0
-                    else:
-                        new_s['node_index'] = next(i for i, n in enumerate(all_nodes_dicts) if n['id'] == new_s['location_id'])
-                    new_steps.append(new_s)
-                stitched.append({"vehicle_id": vid, "steps": new_steps})
-        return stitched
-
-    final_routes_ai = stitch_and_fix(res_ai, past_routes_ai)
+    final_routes_ai = stitch_and_fix(res_ai, past_routes_ai, all_nodes_dicts)
     eval_ai = evaluate_actual_trip(final_routes_ai, m_tdvrp_full, all_nodes_dicts, req.start_time)
     
-    final_routes_bench = stitch_and_fix(res_bench_afternoon, past_routes_bench)
+    final_routes_bench = stitch_and_fix(res_bench_afternoon, past_routes_bench, all_nodes_dicts)
     if len(final_routes_bench) > 0:
         eval_bench = evaluate_actual_trip(final_routes_bench, m_tdvrp_full, all_nodes_dicts, req.start_time)
         sav = eval_bench["total_rp"] - eval_ai["total_rp"]

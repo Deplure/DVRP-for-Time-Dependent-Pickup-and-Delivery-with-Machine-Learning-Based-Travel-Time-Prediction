@@ -16,6 +16,7 @@ import sqlite3
 import uuid
 
 # ================= 1. INISIALISASI =================
+# ================= 1. INISIALISASI =================
 load_dotenv()
 OWM_API_KEY = os.getenv("OPENWEATHER_API_KEY")
 RUN_ID = os.getenv("MLFLOW_RUN_ID")
@@ -27,11 +28,22 @@ OSRM_URL = "http://localhost:5000"
 app = FastAPI(title="AI VRP Backend", description="Engine Optimasi Rute Logistik Full TDVRP")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
+print("Memulai inisialisasi AI Model...")
 try:
+    if not RUN_ID or "PASTE" in RUN_ID:
+        raise ValueError("RUN_ID kosong atau belum diisi dengan benar di file .env!")
+        
     MODEL_PATH = f"runs:/{RUN_ID}/model_vrp_tegalsari_gpu"
-    model = mlflow.xgboost.load_model(MODEL_PATH) if (RUN_ID and "PASTE" not in RUN_ID) else None
-except Exception:
+    model = mlflow.xgboost.load_model(MODEL_PATH)
+    print("✅ SUCCESS: Model Machine Learning (XGBoost) BERHASIL dimuat ke memori!")
+except Exception as e:
     model = None
+    print("=========================================================")
+    print("🚨 FATAL WARNING: MODEL MACHINE LEARNING GAGAL TERBACA!")
+    print(f"Penyebab: {e}")
+    print("Sistem akan berjalan dalam mode DUMB (Tanpa AI Prediktif).")
+    print("Pastikan MLFlow menyala dan RUN_ID di file .env sudah benar.")
+    print("=========================================================")
 
 # ================= 2. DATABASE =================
 def init_db():

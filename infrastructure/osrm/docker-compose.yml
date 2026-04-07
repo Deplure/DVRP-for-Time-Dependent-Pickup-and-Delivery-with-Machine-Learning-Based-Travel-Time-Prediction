@@ -6,12 +6,18 @@ services:
     container_name: osrm-surabaya
     restart: always
     ports:
-      - "5000:5000"
+      # ⚠️  Port 5000 is taken by MLflow UI (mlflow ui default port).
+      # OSRM runs on host port 5001 → container port 5000.
+      - "5001:5000"
     volumes:
-      - ./osrm-data:/data
-    # Command to run the routing engine using the pre-processed MLD (Multi-Level Dijkstra) files.
-    # It assumes the file is named surabaya.osrm
-    command: "osrm-routed --algorithm mld /data/surabaya.osrm"
+      # Mount the current directory (infrastructure/osrm/) where the
+      # java-latest.osrm* files actually live.  The ./osrm-data subfolder
+      # is empty and was the original bug.
+      - ./:/data
+    # The java-latest.osrm.hsgr file proves these were preprocessed with CH
+    # (Contraction Hierarchies), NOT MLD. Using --algorithm mld causes the
+    # "Did you load the right dataset?" crash.
+    command: "osrm-routed --algorithm ch /data/java-latest.osrm"
 
 # =========================================================================================
 # OSRM PRE-PROCESSING INSTRUCTIONS

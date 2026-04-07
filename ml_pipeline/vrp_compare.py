@@ -280,7 +280,9 @@ def solve_vrp_modular(cost_matrix, time_matrix_for_constraint, nodes_data, objec
 
 # ================= 5. SIMULATOR (WASIT) - VERSI DETAIL =================
 
-def simulate_dynamic_trip(model, route_list, start_time, nodes_data, is_rain, matrix_dist, matrix_normal):
+def simulate_dynamic_trip(model, route_list, start_time, nodes_data, is_rain, matrix_dist, matrix_normal, shift_start_time=None):
+    if shift_start_time is None:
+        shift_start_time = start_time
     current_time = start_time
     total_duration_sec = 0
     total_lateness_count = 0 # Hitung berapa kali telat
@@ -318,7 +320,7 @@ def simulate_dynamic_trip(model, route_list, start_time, nodes_data, is_rain, ma
         
         # 3. CEK TIME WINDOW (WASIT)
         tw_start, tw_end = nodes_data[idx_to]['tw']
-        seconds_since_start = (arrival_time - start_time).total_seconds()
+        seconds_since_start = (arrival_time - shift_start_time).total_seconds()
         
         status_msg = "✅ OK"
         

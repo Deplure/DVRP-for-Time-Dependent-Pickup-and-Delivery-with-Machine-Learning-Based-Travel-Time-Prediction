@@ -1,0 +1,22 @@
+artifact_path: file:///D:/Bachelor Thesis Dicky Eka Putra 2022-2026/Bachelor-Thesis/mlruns/6/models/m-bc7f2b251fe542d387c0f64d47452d25/artifacts
+flavors:
+  python_function:
+    data: model.ubj
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.xgboost
+    python_version: 3.11.14
+  xgboost:
+    code: null
+    data: model.ubj
+    model_class: xgboost.sklearn.XGBRegressor
+    model_format: ubj
+    xgb_version: 3.1.3
+mlflow_version: 3.9.0
+model_id: m-bc7f2b251fe542d387c0f64d47452d25
+model_size_bytes: 8234954
+model_uuid: m-bc7f2b251fe542d387c0f64d47452d25
+prompts: null
+run_id: 3edd5c3412564063b57080507a01bcb8
+utc_time_created: '2026-03-04 05:31:20.273413'

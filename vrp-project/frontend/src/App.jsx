@@ -12,7 +12,7 @@ import {
 
 // ===================== CONSTANTS =====================
 const API_URL = 'http://localhost:8000/optimize'
-const OSRM_URL = 'http://localhost:5000'
+const OSRM_URL = 'http://localhost:5001'  // port 5001 — port 5000 is taken by MLflow UI
 
 const DEFAULT_NODES = [
     // ===== 0. DEPOT =====
@@ -358,39 +358,165 @@ export default function App() {
     // ---- Fetch real road geometry from local OSRM ----
     const fetchOsrmRoads = async (routes, currentNodes) => {
         setOsrmLoading(true)
+
+        // ------------------------------------------------------------------
+        // STEP 1 — Build a fast O(1) lookup map from node ID → {lat, lon}.
+        // Also register every possible depot alias so '0_Depot_Akhir',
+        // '0_Depot_JNE', and whatever the backend returns all resolve to
+        // the same coordinate.
+        // ------------------------------------------------------------------
+        const nodeMap = {}
+        if (currentNodes && currentNodes.length > 0) {
+            const depot = currentNodes[0]
+            // Register the actual depot ID
+            nodeMap[depot.id] = { lat: depot.lat, lon: depot.lon }
+            // Register hard-coded aliases the backend may emit
+            nodeMap['0_Depot_Akhir'] = { lat: depot.lat, lon: depot.lon }
+            nodeMap['0_Depot_JNE']   = { lat: depot.lat, lon: depot.lon }
+            nodeMap['0_Depot']       = { lat: depot.lat, lon: depot.lon }
+            // Register all other nodes
+            for (let k = 1; k < currentNodes.length; k++) {
+                const n = currentNodes[k]
+                nodeMap[n.id] = { lat: n.lat, lon: n.lon }
+            }
+        }
+
+        console.log(
+            `%c[OSRM] Node map built — ${Object.keys(nodeMap).length} entries`,
+            'color:#a855f7;font-weight:bold'
+        )
+
+        // ------------------------------------------------------------------
+        // STEP 2 — Pre-flight connectivity probe.
+        // KEY RULE: if we get ANY HTTP response (even 404), OSRM is UP and
+        // CORS is NOT blocking us (a CORS block throws — it never gives a
+        // status code).  Only a thrown TypeError/"Failed to fetch" means
+        // the server is truly unreachable or CORS-blocked.
+        // ------------------------------------------------------------------
+        let osrmReachable = false
+        try {
+            const probe = await fetch(
+                `${OSRM_URL}/nearest/v1/driving/112.736966,-7.265232`,
+                { signal: AbortSignal.timeout(4000) }
+            )
+            // Any HTTP response — 200, 404, 400 — proves the container is UP
+            // and that the browser is not CORS-blocking us.
+            osrmReachable = true
+            console.log(
+                `%c[OSRM] ✅ Pre-flight probe — container is UP (HTTP ${probe.status}). Proceeding with route calls.`,
+                'color:#4ade80;font-weight:bold'
+            )
+        } catch (probeErr) {
+            // Only thrown when: container is DOWN, Docker not running, or CORS blocks the response.
+            // A CORS block shows as TypeError: "Failed to fetch" / "NetworkError".
+            osrmReachable = false
+            console.error(
+                `%c[OSRM] ❌ Pre-flight EXCEPTION — ${probeErr.name}: "${probeErr.message}"`,
+                'color:#f87171;font-weight:bold'
+            )
+            console.error(
+                '%c[OSRM] 💡 "Failed to fetch" = OSRM container is down OR CORS is missing.\n' +
+                '  → Make sure the container is running: docker ps\n' +
+                '  → If running, add --cors-headers=* to osrm-routed in docker-compose.yml and restart.',
+                'color:#fbbf24'
+            )
+        }
+
+        // ------------------------------------------------------------------
+        // STEP 3 — Iterate over each vehicle route and request OSRM geometry.
+        // ------------------------------------------------------------------
         const roadGeoms = []
 
         for (let i = 0; i < routes.length; i++) {
             const veh = routes[i]
             const color = VEHICLE_COLORS[i % VEHICLE_COLORS.length]
 
-            const orderedCoords = veh.steps
-                ?.map(step => {
-                    if (step.location_id === '0_Depot_Akhir') {
-                        const depot = currentNodes[0]
-                        return depot ? { lon: depot.lon, lat: depot.lat } : null
+            // Map each step's location_id → { lat, lon } using the lookup map
+            const orderedCoords = (veh.steps || [])
+                .map(step => {
+                    const coord = nodeMap[step.location_id]
+                    if (!coord) {
+                        console.error(
+                            `%c[OSRM] Vehicle ${veh.vehicle_id} — ` +
+                            `UNKNOWN location_id: "${step.location_id}"  ` +
+                            `(not found in nodeMap — check backend ID vs DEFAULT_NODES)`,
+                            'color:#f87171'
+                        )
                     }
-                    const node = currentNodes.find(n => n.id === step.location_id)
-                    return node ? { lon: node.lon, lat: node.lat } : null
+                    return coord || null
                 })
                 .filter(Boolean)
 
             if (orderedCoords.length < 2) {
+                console.warn(`[OSRM] Vehicle ${veh.vehicle_id} — fewer than 2 resolved coords (${orderedCoords.length}), skipping OSRM call`)
                 roadGeoms.push({ latLngs: [], color, vehicleId: veh.vehicle_id })
                 continue
             }
 
+            // OSRM expects: lon,lat;lon,lat;...
             const waypointStr = orderedCoords.map(c => `${c.lon},${c.lat}`).join(';')
             const osrmEndpoint = `${OSRM_URL}/route/v1/driving/${waypointStr}?overview=full&geometries=geojson`
 
+            console.log(`[OSRM] Vehicle ${veh.vehicle_id} → ${orderedCoords.length} waypoints`)
+            console.log(`[OSRM] URL: ${osrmEndpoint}`)
+
+            if (!osrmReachable) {
+                // We already know OSRM is unreachable — skip the fetch and go
+                // straight to fallback without another network round-trip.
+                console.error(
+                    `%c[OSRM] ⛔ Skipping fetch for Vehicle ${veh.vehicle_id} — OSRM pre-flight failed`,
+                    'color:#f87171'
+                )
+                roadGeoms.push({
+                    latLngs: orderedCoords.map(c => [c.lat, c.lon]),
+                    color,
+                    vehicleId: veh.vehicle_id,
+                    isFallback: true,
+                })
+                continue
+            }
+
             try {
-                const res = await fetch(osrmEndpoint)
-                if (!res.ok) throw new Error(`OSRM HTTP ${res.status}`)
+                const res = await fetch(osrmEndpoint, { signal: AbortSignal.timeout(8000) })
+
+                if (!res.ok) {
+                    // Log the full HTTP error so we can see exactly what OSRM said
+                    let body = ''
+                    try { body = await res.text() } catch (_) { /* ignore */ }
+                    console.error(
+                        `%c[OSRM] ❌ Vehicle ${veh.vehicle_id} — HTTP ${res.status} ${res.statusText}`,
+                        'color:#f87171;font-weight:bold'
+                    )
+                    console.error(`[OSRM]    Response body: ${body.slice(0, 300)}`)
+                    console.error(`[OSRM]    Failing URL  : ${osrmEndpoint}`)
+                    throw new Error(`OSRM HTTP ${res.status} ${res.statusText}`)
+                }
+
                 const data = await res.json()
+
+                if (!data.routes || data.routes.length === 0) {
+                    console.error(
+                        `%c[OSRM] ❌ Vehicle ${veh.vehicle_id} — response OK but data.routes is empty`,
+                        'color:#f87171;font-weight:bold'
+                    )
+                    console.error('[OSRM]    Full response:', data)
+                    throw new Error('OSRM returned no routes')
+                }
+
+                // GeoJSON coordinates are [lon, lat] — flip to [lat, lon] for Leaflet
                 const latLngs = data.routes[0].geometry.coordinates.map(([lon, lat]) => [lat, lon])
-                roadGeoms.push({ latLngs, color, vehicleId: veh.vehicle_id })
+                console.log(`%c[OSRM] ✅ Vehicle ${veh.vehicle_id} — ${latLngs.length} road points`, 'color:#4ade80')
+                roadGeoms.push({ latLngs, color, vehicleId: veh.vehicle_id, isFallback: false })
+
             } catch (e) {
-                console.warn(`OSRM fetch failed for vehicle ${veh.vehicle_id}:`, e.message)
+                // Catch covers: network errors, CORS blocks, JSON parse failures, AbortError
+                console.error(
+                    `%c[OSRM] ❌ Vehicle ${veh.vehicle_id} — EXCEPTION: ${e.name}: "${e.message}"`,
+                    'color:#f87171;font-weight:bold'
+                )
+                console.error(`[OSRM]    Waypoint string: ${waypointStr}`)
+                console.error(`[OSRM]    Full URL: ${osrmEndpoint}`)
+                // FALLBACK: draw straight Euclidean line so the route is still visible
                 roadGeoms.push({
                     latLngs: orderedCoords.map(c => [c.lat, c.lon]),
                     color,
@@ -402,6 +528,14 @@ export default function App() {
 
         setOsrmRoads(roadGeoms)
         setOsrmLoading(false)
+
+        // Surface a summary so the user can see the result in the console
+        const snapped   = roadGeoms.filter(r => !r.isFallback && r.latLngs.length > 1).length
+        const fallbacks = roadGeoms.filter(r => r.isFallback).length
+        console.log(
+            `%c[OSRM] Done — ${snapped} road-snapped, ${fallbacks} fallback (straight-line)`,
+            snapped > 0 ? 'color:#4ade80;font-weight:bold' : 'color:#fbbf24;font-weight:bold'
+        )
     }
 
     // ---- Run AI Optimization ----

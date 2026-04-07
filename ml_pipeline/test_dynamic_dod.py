@@ -25,7 +25,7 @@ from vrp_compare import (
 )
 
 # ================= 1. HELPERS DYNAMIC SOLVER =================
-def solve_vrp_dynamic(cost_matrix, time_matrix, active_nodes, num_vehicles, starts, ends, objective_name="Routing"):
+def solve_vrp_dynamic(cost_matrix, time_matrix, active_nodes, num_vehicles, starts, ends, start_delays=None, objective_name="Routing"):
     """
     Dynamic VRP Solver pendukung DOD:
     - active_nodes: Subset node (mewakili matriks N x N yang terkirim)
@@ -70,6 +70,11 @@ def solve_vrp_dynamic(cost_matrix, time_matrix, active_nodes, num_vehicles, star
         index = manager.NodeToIndex(location_idx)
         time_dimension.CumulVar(index).SetMin(st)
         time_dimension.SetCumulVarSoftUpperBound(index, en, 100) # Soft bound
+
+    if start_delays is not None:
+        for vehicle_id in range(num_vehicles):
+            idx = routing.Start(vehicle_id)
+            time_dimension.CumulVar(idx).SetMin(start_delays[vehicle_id])
 
     # 3. SET CONSTRAINT CAPACITY
     def demand_callback(from_index):
@@ -231,8 +236,11 @@ def run_dod_simulation(percentage, model, is_rain):
         starts_ph3.append(idx)
         
     ends_ph3 = [depot_asli_idx] * NUM_VEHICLES 
+    
+    offset_sec = int((interrupt_time - start_time_ph1).total_seconds())
+    start_delays_ph3 = [offset_sec] * NUM_VEHICLES
 
-    routes_ph3 = solve_vrp_dynamic(mat_time_ph3, mat_time_ph3, active_nodes_ph3, NUM_VEHICLES, starts_ph3, ends_ph3)
+    routes_ph3 = solve_vrp_dynamic(mat_time_ph3, mat_time_ph3, active_nodes_ph3, NUM_VEHICLES, starts_ph3, ends_ph3, start_delays=start_delays_ph3)
     
     if not routes_ph3:
         print("   ❌ Re-Routing GAGAL/OVERLOAD (Kapasitas & Waktu Tidak Cukup Terhadap Order Baru).")
@@ -247,7 +255,7 @@ def run_dod_simulation(percentage, model, is_rain):
         total_late = 0
         for i, rute in enumerate(routes_ph3):
             if len(rute) > 1:
-                dur, late = simulate_dynamic_trip(model, rute, interrupt_time, active_nodes_ph3, is_rain, dists, durs)
+                dur, late = simulate_dynamic_trip(model, rute, interrupt_time, active_nodes_ph3, is_rain, dists, durs, shift_start_time=start_time_ph1)
                 total_time_ph3_sec += dur
                 total_late += late
                 

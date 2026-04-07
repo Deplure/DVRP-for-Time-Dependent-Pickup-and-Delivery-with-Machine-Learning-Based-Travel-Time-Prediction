@@ -70,6 +70,7 @@ class NodeInfo(BaseModel):
     demand: int
     tw_start: int
     tw_end: int
+    service_time: int = 120   # seconds; 0 for depot
 
 class OptimizeRequest(BaseModel):
     nodes: List[NodeInfo]
@@ -211,16 +212,15 @@ def evaluate_actual_trip(routes: List[Dict], tdvrp_matrices: Dict[Tuple[int, int
                 current_hour = curr_time.hour
                 current_minute = curr_time.minute
                 clamped_hour = max(7, min(19, current_hour))
-                
                 if clamped_hour == 19:
                     clamped_minute = 0
                 else:
                     clamped_minute = 0 if current_minute < 30 else 30
-                
                 tt = tdvrp_matrices[(clamped_hour, clamped_minute)][prev_idx][idx]
                 curr_time += timedelta(seconds=int(tt))
-                total_fuel += int(tt * 5) 
+                total_fuel += int(tt * 5)
             
+            # Time-window enforcement: wait if arriving too early
             sec_since_start = (curr_time - base_time).total_seconds()
             is_late = False
             if idx < len(nodes_data) and idx != 0:
@@ -232,12 +232,24 @@ def evaluate_actual_trip(routes: List[Dict], tdvrp_matrices: Dict[Tuple[int, int
                     is_late = True
                     total_late += 1
             
+            # Service time at this node
+            is_depot_end = step.get('task') in ('FINISH',) or step.get('location_id') == '0_Depot_Akhir'
+            svc_s = 0 if is_depot_end else nodes_data[idx].get('service_time', 120) if idx < len(nodes_data) else 120
+            # START (first depot visit) also has 0 service
+            if step.get('task') == 'START':
+                svc_s = 0
+
+            dep_time = curr_time + timedelta(seconds=svc_s)
+
             s = step.copy()
-            s['arrival_time'] = curr_time.strftime("%H:%M:%S")
+            s['arrival_time'] = curr_time.strftime("%H:%M")
+            s['service_duration_mins'] = round(svc_s / 60, 1)
+            s['departure_time'] = dep_time.strftime("%H:%M")
             s['is_late'] = is_late
             new_steps.append(s)
-            
-            if idx != 0: curr_time += timedelta(seconds=120)
+
+            # Advance clock by service time before moving to next node
+            curr_time = dep_time
             
         evaluated.append({"vehicle_id": route["vehicle_id"], "steps": new_steps})
     return {"fuel_rp": total_fuel, "penalty_rp": total_late * 20000, "total_rp": total_fuel + (total_late * 20000), "late_count": total_late, "routes": evaluated}
@@ -254,8 +266,12 @@ def solve_vrp_modular(cost_matrix: np.ndarray, time_matrix: np.ndarray, nodes_da
     routing.SetArcCostEvaluatorOfAllVehicles(routing.RegisterTransitCallback(cost_cb))
 
     def time_cb(f, t):
-        v = int(time_matrix[manager.IndexToNode(f)][manager.IndexToNode(t)])
-        return v + (0 if manager.IndexToNode(t) in ends else 120)
+        fn = manager.IndexToNode(f)
+        tn = manager.IndexToNode(t)
+        travel = int(time_matrix[fn][tn])
+        # Service time is added at the FROM node, but not at depot end nodes
+        svc = nodes_data[fn].get('service_time', 120) if fn not in ends else 0
+        return travel + svc
     time_dim_idx = routing.RegisterTransitCallback(time_cb)
     routing.AddDimension(time_dim_idx, 36000, 86400, False, 'Time')
     time_dim = routing.GetDimensionOrDie('Time')
@@ -293,12 +309,32 @@ def solve_vrp_modular(cost_matrix: np.ndarray, time_matrix: np.ndarray, nodes_da
             arr_t = base_time + timedelta(seconds=sol.Value(time_dim.CumulVar(idx)))
             dem = nodes_data[n_idx]['demand']
             task = "START" if n_idx in starts else ("PICKUP" if dem > 0 else ("DROP" if dem < 0 else "PASS"))
-            steps.append({"node_index": n_idx, "location_id": nodes_data[n_idx]['id'], "task": task, "demand": dem, "arrival_time": arr_t.strftime("%H:%M:%S")})
+            svc_s = nodes_data[n_idx].get('service_time', 120) if task not in ('START', 'FINISH') else 0
+            dep_t = arr_t + timedelta(seconds=svc_s)
+            steps.append({
+                "node_index": n_idx,
+                "location_id": nodes_data[n_idx]['id'],
+                "task": task,
+                "demand": dem,
+                "arrival_time": arr_t.strftime("%H:%M"),
+                "service_duration_mins": round(svc_s / 60, 1),
+                "departure_time": dep_t.strftime("%H:%M"),
+            })
             prev, idx = manager.IndexToNode(idx), sol.Value(routing.NextVar(idx))
             if prev != manager.IndexToNode(idx): cost += (int(cost_rupiah[prev][manager.IndexToNode(idx)]) * 5)
             
         arr_t = base_time + timedelta(seconds=sol.Value(time_dim.CumulVar(idx)))
-        steps.append({"node_index": manager.IndexToNode(idx), "location_id": "0_Depot_Akhir", "task": "FINISH", "demand": 0, "arrival_time": arr_t.strftime("%H:%M:%S")})
+        svc_s = nodes_data[manager.IndexToNode(idx)].get('service_time', 0) if manager.IndexToNode(idx) not in ends else 0
+        dep_t = arr_t + timedelta(seconds=svc_s)
+        steps.append({
+            "node_index": manager.IndexToNode(idx),
+            "location_id": "0_Depot_Akhir",
+            "task": "FINISH",
+            "demand": 0,
+            "arrival_time": arr_t.strftime("%H:%M"),
+            "service_duration_mins": 0,
+            "departure_time": arr_t.strftime("%H:%M"),
+        })
         routes.append({"vehicle_id": v + 1, "steps": steps})
 
     return {"status": "SUCCESS", "objective_value": cost, "routes": routes}
@@ -332,7 +368,8 @@ def solve_tdvrp_with_look_ahead(nodes_data: List[Dict], start_time_str: str, num
                 if step["location_id"] == "0_Depot_Akhir": continue
                 
                 node_idx = step["node_index"]
-                arr_h, arr_m, _ = map(int, step["arrival_time"].split(':'))
+                parts = step["arrival_time"].split(':')
+                arr_h, arr_m = int(parts[0]), int(parts[1])
                 arr_h = max(7, min(19, arr_h))
                 if arr_h == 19:
                     arr_m = 0
@@ -365,22 +402,31 @@ def build_past_routes(routes, original_nodes, b_time, i_time, depot_id):
         
         for step in route['steps']:
             loc_id = depot_id if step['location_id'] == "0_Depot_Akhir" else step['location_id']
-            arr_h, arr_m, arr_s = map(int, step['arrival_time'].split(":"))
-            arr_dt = b_time.replace(hour=arr_h, minute=arr_m, second=arr_s)
-            
-            service_time = 0 if loc_id == depot_id else 120
-            
+            a_parts = step['arrival_time'].split(':')
+            arr_h, arr_m = int(a_parts[0]), int(a_parts[1])
+            arr_dt = b_time.replace(hour=arr_h, minute=arr_m, second=0, microsecond=0)
+
+            # Use departure_time when available (accounts for service duration)
+            dep_str = step.get('departure_time') or step['arrival_time']
+            d_parts = dep_str.split(':')
+            dep_dt = b_time.replace(hour=int(d_parts[0]), minute=int(d_parts[1]), second=0, microsecond=0)
+
+            # Fallback service window if departure_time not present
+            svc_node = dep_dt if dep_dt > arr_dt else arr_dt + timedelta(seconds=(
+                0 if loc_id == depot_id else step.get('service_duration_mins', 2) * 60
+            ))
+
             if arr_dt > i_time:
                 visited_ids.append(loc_id)
                 l_id = loc_id
                 past_steps.append(step.copy())
-                delay_sec = int((arr_dt - i_time).total_seconds()) + service_time
+                delay_sec = int((arr_dt - i_time).total_seconds())
                 break
-            elif arr_dt + timedelta(seconds=service_time) > i_time:
+            elif svc_node > i_time:
                 visited_ids.append(loc_id)
                 l_id = loc_id
                 past_steps.append(step.copy())
-                delay_sec = int(((arr_dt + timedelta(seconds=service_time)) - i_time).total_seconds())
+                delay_sec = int((svc_node - i_time).total_seconds())
                 break
             else:
                 visited_ids.append(loc_id)
@@ -428,7 +474,7 @@ def optimize_route(req: OptimizeRequest):
     sh, sm = map(int, req.start_time.split(':'))
     if not (7 <= sh <= 19): raise HTTPException(status_code=400, detail="Operasional diluar jam kerja! Harap masukkan jam antara 07:00 hingga 19:00.")
 
-    nodes = [{'id': n.id, 'lat': n.lat, 'lon': n.lon, 'demand': n.demand, 'tw_start': n.tw_start, 'tw_end': n.tw_end} for n in req.nodes]
+    nodes = [{'id': n.id, 'lat': n.lat, 'lon': n.lon, 'demand': n.demand, 'tw_start': n.tw_start, 'tw_end': n.tw_end, 'service_time': n.service_time} for n in req.nodes]
     
     hourly_rain, w_desc = get_hourly_weather_forecast(nodes[0]['lat'], nodes[0]['lon'])
     current_hour_rain = hourly_rain.get(sh, 0)
@@ -458,6 +504,8 @@ def optimize_route(req: OptimizeRequest):
         "benchmark_cost_rp": e_bnc["total_rp"], "bench_penalty_rp": e_bnc["penalty_rp"], "bench_late_count": e_bnc["late_count"], 
         "savings_rp": sav
     }
+    # Expose evaluated benchmark routes so the frontend can render a side-by-side comparison map
+    res_ai["benchmark_routes"] = [r for r in e_bnc.get("routes", []) if len(r.get("steps", [])) > 2] if res_bench.get("status") == "SUCCESS" else []
     return res_ai
 
 @app.post("/dynamic_injection")
@@ -487,7 +535,7 @@ def dynamic_injection(req: DynamicInjectionRequest):
     active_ai = k_nodes_ai + unvisited_ai + req.new_orders
     if depot.id not in [n.id for n in active_ai]: active_ai.append(depot) 
     
-    a_dicts_ai = [{'id': n.id, 'lat': n.lat, 'lon': n.lon, 'demand': n.demand, 'tw_start': max(0, n.tw_start - offset_sec), 'tw_end': max(0, n.tw_end - offset_sec)} for n in active_ai]
+    a_dicts_ai = [{'id': n.id, 'lat': n.lat, 'lon': n.lon, 'demand': n.demand, 'tw_start': max(0, n.tw_start - offset_sec), 'tw_end': max(0, n.tw_end - offset_sec), 'service_time': n.service_time} for n in active_ai]
     d_idx_ai = next(i for i, n in enumerate(a_dicts_ai) if n['id'] == depot.id)
     
     starts_ai = [next(i for i, a in enumerate(a_dicts_ai) if a['id'] == last_loc_by_vid_ai[v].id) if v in last_loc_by_vid_ai else d_idx_ai for v in range(1, req.num_vehicles + 1)]
@@ -503,7 +551,7 @@ def dynamic_injection(req: DynamicInjectionRequest):
     # =========================================================================
     # PARALLEL UNIVERSE B: KURIR MENGGUNAKAN STANDAR SEJAK PAGI
     # =========================================================================
-    orig_dicts = [{'id': n.id, 'lat': n.lat, 'lon': n.lon, 'demand': n.demand, 'tw_start': n.tw_start, 'tw_end': n.tw_end} for n in req.original_nodes]
+    orig_dicts = [{'id': n.id, 'lat': n.lat, 'lon': n.lon, 'demand': n.demand, 'tw_start': n.tw_start, 'tw_end': n.tw_end, 'service_time': n.service_time} for n in req.original_nodes]
     m_dist_orig, m_time_orig = generate_distance_matrix(orig_dicts)
     res_bench_morning = solve_vrp_modular(m_dist_orig, m_time_orig, orig_dicts, req.start_time, req.num_vehicles, req.vehicle_capacity, m_time_orig)
 
@@ -519,7 +567,7 @@ def dynamic_injection(req: DynamicInjectionRequest):
     active_bench = k_nodes_bench + unvisited_bench + req.new_orders
     if depot.id not in [n.id for n in active_bench]: active_bench.append(depot) 
     
-    a_dicts_bench = [{'id': n.id, 'lat': n.lat, 'lon': n.lon, 'demand': n.demand, 'tw_start': max(0, n.tw_start - offset_sec), 'tw_end': max(0, n.tw_end - offset_sec)} for n in active_bench]
+    a_dicts_bench = [{'id': n.id, 'lat': n.lat, 'lon': n.lon, 'demand': n.demand, 'tw_start': max(0, n.tw_start - offset_sec), 'tw_end': max(0, n.tw_end - offset_sec), 'service_time': n.service_time} for n in active_bench]
     d_idx_bench = next(i for i, n in enumerate(a_dicts_bench) if n['id'] == depot.id)
     
     starts_bench = [next(i for i, a in enumerate(a_dicts_bench) if a['id'] == last_loc_by_vid_bench[v].id) if v in last_loc_by_vid_bench else d_idx_bench for v in range(1, req.num_vehicles + 1)]
@@ -533,7 +581,7 @@ def dynamic_injection(req: DynamicInjectionRequest):
     # PENJAHITAN DAN SIMULASI AKHIR (MEMBANDINGKAN 2 UNIVERSE)
     # =========================================================================
     all_nodes = req.original_nodes + req.new_orders
-    all_nodes_dicts = [{'id': n.id, 'lat': n.lat, 'lon': n.lon, 'demand': n.demand, 'tw_start': n.tw_start, 'tw_end': n.tw_end} for n in all_nodes]
+    all_nodes_dicts = [{'id': n.id, 'lat': n.lat, 'lon': n.lon, 'demand': n.demand, 'tw_start': n.tw_start, 'tw_end': n.tw_end, 'service_time': n.service_time} for n in all_nodes]
     m_tdvrp_full = generate_tdvrp_matrices(model, all_nodes_dicts, datetime.now().weekday(), hourly_rain)
 
     final_routes_ai = stitch_and_fix(res_ai, past_routes_ai, all_nodes_dicts)

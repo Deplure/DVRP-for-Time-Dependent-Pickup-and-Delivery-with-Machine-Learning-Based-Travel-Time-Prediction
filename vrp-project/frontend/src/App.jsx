@@ -1856,6 +1856,7 @@ export default function App() {
                                     routeData={selectedLiveCourier}
                                     nodeMap={nodeMapForCourier}
                                     vehicleColor={vehicleColor}
+                                    osrmRoads={osrmRoads}
                                     onClose={() => setSelectedLiveCourier(null)}
                                 />
                             </div>

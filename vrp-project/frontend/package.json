@@ -9,6 +9,7 @@
         "preview": "vite preview"
     },
     "dependencies": {
+        "@turf/turf": "^7.3.4",
         "axios": "^1.7.7",
         "leaflet": "^1.9.4",
         "lucide-react": "^0.468.0",

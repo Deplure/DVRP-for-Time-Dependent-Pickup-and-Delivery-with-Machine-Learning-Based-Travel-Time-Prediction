@@ -1849,14 +1849,17 @@ export default function App() {
                             </div>
 
                             {/* ── Full CourierMobileView (leaves room for the manager bar) ── */}
+                            {/* key=vehicle_id forces a full remount (and hook reinit) when  */}
+                            {/* the manager switches to a different courier's live view.       */}
                             <div className="h-full pb-12">
                                 <CourierMobileView
+                                    key={selectedLiveCourier.vehicle_id}
                                     vehicleId={selectedLiveCourier.vehicle_id}
                                     currentLocation={mockGPS}
-                                    routeData={selectedLiveCourier}
+                                    routeData={selectedLiveCourier.steps || []}
                                     nodeMap={nodeMapForCourier}
                                     vehicleColor={vehicleColor}
-                                    osrmRoads={osrmRoads}
+                                    polylineGeometry={osrmRoads.filter(r => r.vehicleId === selectedLiveCourier.vehicle_id)}
                                     onClose={() => setSelectedLiveCourier(null)}
                                 />
                             </div>

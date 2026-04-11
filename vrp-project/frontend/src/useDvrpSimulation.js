@@ -1,156 +1,128 @@
 /**
  * useDvrpSimulation.js
  * ════════════════════════════════════════════════════════════════════════════
- * Custom React hook — Hybrid DVRP Simulation Engine
+ * Pure Derived-State DVRP Simulation Engine  v3
  *
- * Responsibilities
+ * DESIGN PRINCIPLE
  * ─────────────────
- *  1. DOD MATH & AUTO-CORRECTION
- *     • Compute D = round( (DOD × S) / (1 − DOD) ) dynamic orders
- *     • Snap actualDod to the mathematically achievable value given rounded D
+ *   `currentVirtualTime` is the ONLY piece of mutable state.
+ *   Completion, pending, nextStop, and prevNode are ALL derived from it
+ *   on every render — no arrays are ever mutated or moved.
  *
- *  2. DYNAMIC ORDER POOL
- *     • Generate D synthetic orders from the static node list
- *     • Each order gets a random `spawnTime` (virtual seconds into the sim)
+ *   This guarantees that dragging the time scrubber backward (rewinding)
+ *   automatically un-completes nodes with zero state desync possible.
  *
- *  3. VIRTUAL CLOCK
- *     • Runs at SIM_SPEED× wall-clock (default 60 → 1 real-sec = 1 sim-min)
- *     • Controls: play(), pause(), reset()
+ * TICK RATE
+ * ──────────
+ *   Every TICK_INTERVAL_MS (500 ms) real time, the virtual clock advances
+ *   by VIRTUAL_SECS_PER_TICK (10) virtual seconds.
+ *   → 1 real-world second ≈ 20 simulation seconds.
  *
- *  4. TIME-BASED INJECTION
- *     • Each tick checks the pool for orders whose spawnTime ≤ currentVirtualTime
- *     • Injects them into currentRouteQueue and fires onDynamicOrderInjected()
- *
- *  5. NODE COMPLETION
- *     • markNodeAsCompleted(nodeId) removes from queue → completedNodes
- *
- * Usage
- * ─────
- *   const sim = useDvrpSimulation({
- *     initialOrders,                           // 30 static node objects
- *     onDynamicOrderInjected: (order, queue, completed) => { ... }
- *   })
- *
+ * EXPORTED UTILITIES
+ * ───────────────────
+ *   parseTimeSec(s)                   — "HH:MM" → seconds-since-midnight
+ *   generateDynamicPool(nodes, n)     — DOD synthetic order factory
+ *   calculateDynamicOrders(S, dod)    — D = round(DOD·S / (1−DOD))
+ *   calculateActualDod(S, D)          — actualDod = D / (S + D)
+ *   SIM_OFFSET_SECS                   — 8 * 3600  (sim starts 08:00)
+ *   TICK_INTERVAL_MS                  — 500
+ *   VIRTUAL_SECS_PER_TICK             — 10
  * ════════════════════════════════════════════════════════════════════════════
  */
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
+export const SIM_OFFSET_SECS       = 8 * 3600   // 08:00:00 in seconds
+export const TICK_INTERVAL_MS      = 500         // setInterval cadence (ms)
+export const VIRTUAL_SECS_PER_TICK = 10          // sim-seconds per interval tick
+export const SIM_DURATION_FALLBACK = 14_400      // 4 h fallback when no ETAs present
 
-/** The baseline static-order count — locked for this experiment. */
-const STATIC_COUNT = 30
+// ─── PURE HELPERS (exported for consumers) ────────────────────────────────────
 
 /**
- * Simulation speed multiplier.
- * 60 → each real-world second advances the virtual clock by 60 virtual seconds
- * (i.e. 1 real second ≈ 1 simulation minute).
+ * parseTimeSec — "HH:MM" or "HH:MM:SS" → seconds since midnight.
+ * Returns NaN for missing or malformed input, never throws.
  */
-const SIM_SPEED = 60
+export function parseTimeSec(s) {
+    if (!s || !/^\d{1,2}:\d{2}/.test(s)) return NaN
+    const [h, m] = s.split(':').map(Number)
+    return h * 3600 + m * 60
+}
 
 /**
- * How often the engine ticks in real milliseconds.
- * 500 ms → smooth injection detection without thrashing.
- */
-const TICK_MS = 500
-
-/**
- * Total simulation duration in virtual seconds.
- * 14 400 s = 4 virtual hours (e.g. 08:00 → 12:00).
- */
-const SIM_DURATION_VIRTUAL_SECS = 14_400
-
-// ─── PURE MATH HELPERS ───────────────────────────────────────────────────────
-
-/**
- * calculateDynamicOrders
- * ──────────────────────
- * Given a static count S and user-requested DOD (0–1 decimal), returns the
- * number of dynamic orders D rounded to the nearest integer.
- *
- * Formula derivation:
- *   DOD = D / (S + D)   →   D = (DOD × S) / (1 − DOD)
- *
- * @param {number} staticCount  - Number of pre-loaded static orders (S)
- * @param {number} targetDod    - Requested DOD as a decimal in [0, 1)
- * @returns {number}            - Whole-integer count of dynamic orders
+ * calculateDynamicOrders — D = round( (DOD × S) / (1 − DOD) )
  */
 export function calculateDynamicOrders(staticCount, targetDod) {
     if (targetDod <= 0) return 0
-    if (targetDod >= 1) return Infinity // degenerate; guard in UI layer
+    if (targetDod >= 1) return Infinity
     return Math.round((targetDod * staticCount) / (1 - targetDod))
 }
 
 /**
- * calculateActualDod
- * ──────────────────
- * Returns the real, mathematically achievable DOD once D has been rounded to
- * a whole integer.
- *
- * Formula: actualDod = D / (S + D)
- *
- * @param {number} staticCount   - S
- * @param {number} dynamicCount  - D (already rounded integer)
- * @returns {number}             - Actual DOD as a decimal in [0, 1)
+ * calculateActualDod — actualDod = D / (S + D)
  */
 export function calculateActualDod(staticCount, dynamicCount) {
     const total = staticCount + dynamicCount
-    if (total === 0) return 0
-    return dynamicCount / total
+    return total === 0 ? 0 : dynamicCount / total
 }
 
-// ─── DYNAMIC ORDER FACTORY ───────────────────────────────────────────────────
-
 /**
- * generateDynamicPool
- * ───────────────────
- * Produces `count` synthetic order objects by sampling from `sourceNodes`.
- * Each order is a shallow clone of a real node (maintains valid coordinates)
- * with a unique ID, a "DYNAMIC" tag, and a random spawnTime.
+ * generateDynamicPool — produce `count` synthetic "dynamic" orders.
  *
- * spawnTime is spread uniformly across [10%, 90%] of SIM_DURATION so that:
- *  • No orders appear in the first 10 % (give the courier a head-start).
- *  • No orders appear in the last 10 % (avoid un-deliverable late injections).
+ * Each order is a shallow clone of a real static node with:
+ *   • A unique id prefixed with "DYN_"
+ *   • isDynamic: true
+ *   • spawnTime: virtual seconds from sim start when this order appears
+ *   • No arrival_time — completed only manually or by OSRM ETA assignment
  *
- * @param {Array}  sourceNodes - Static order array to sample from
- * @param {number} count       - Number of dynamic orders to generate
- * @returns {Array}            - Dynamic order objects, sorted by spawnTime asc
+ * spawnTime is drawn uniformly from
+ *   [ routeStartVT + 5 min,  routeEndVT - 5 min ]
+ * so orders always fall inside the vehicle's actual shift window.
+ * Returns [] if the window is too narrow for a safe buffer.
+ *
+ * @param {Array}  sourceNodes          - static delivery nodes to clone
+ * @param {number} count                - how many dynamic orders to create
+ * @param {object} [bounds]             - route time boundaries (virtual secs)
+ * @param {number} [bounds.routeEndVT]  - last static node's ETA in vt
+ * @param {number} [bounds.routeStartVT=0] - first departure in vt (default 0)
  */
-function generateDynamicPool(sourceNodes, count) {
+export function generateDynamicPool(
+    sourceNodes,
+    count,
+    { routeEndVT = SIM_DURATION_FALLBACK, routeStartVT = 0 } = {}
+) {
     if (!sourceNodes?.length || count <= 0) return []
 
-    const spawnStart = SIM_DURATION_VIRTUAL_SECS * 0.10
-    const spawnEnd   = SIM_DURATION_VIRTUAL_SECS * 0.90
-    const spawnRange = spawnEnd - spawnStart
+    const MIN_BUFFER_SECS = 300  // 5 virtual minutes
+    const spawnStart = routeStartVT + MIN_BUFFER_SECS
+    const spawnEnd   = routeEndVT   - MIN_BUFFER_SECS
 
-    const pool = []
-    for (let i = 0; i < count; i++) {
-        // Cycle through source nodes if count > sourceNodes.length
-        const source = sourceNodes[i % sourceNodes.length]
-        pool.push({
-            // ── Identity ──
-            id:         `DYN_${i + 1}_${source.id}`,
-            origin_id:  source.id,
-            isDynamic:  true,
-
-            // ── Geography (inherited from real node) ──
-            lat:         source.lat,
-            lon:         source.lon,
-
-            // ── Logistics ──
-            demand:       source.demand ?? 1,
-            tw_start:     source.tw_start ?? 0,
-            tw_end:       source.tw_end   ?? SIM_DURATION_VIRTUAL_SECS,
-            service_time: source.service_time ?? 120,
-
-            // ── Simulation metadata ──
-            // spawnTime: virtual seconds from sim-start when this order "arrives"
-            spawnTime:    Math.round(spawnStart + Math.random() * spawnRange),
-            injected:     false,  // flipped to true once moved into the queue
-        })
+    if (spawnStart >= spawnEnd) {
+        // Route window is too short to safely inject dynamic orders
+        console.warn(
+            `[DOD] Spawn window too narrow ` +
+            `(${spawnStart}–${spawnEnd} vt). ` +
+            `Route duration must be > ${MIN_BUFFER_SECS * 2}s. Skipping pool.`
+        )
+        return []
     }
 
-    // Sort ascending so the injection loop can process cheaply in order
+    const spawnRange = spawnEnd - spawnStart
+    const pool = []
+    for (let i = 0; i < count; i++) {
+        const src = sourceNodes[i % sourceNodes.length]
+        pool.push({
+            ...src,
+            id:             `DYN_${i + 1}_${src.id}`,
+            location_id:    `DYN_${i + 1}_${src.id}`,
+            origin_id:      src.id,
+            isDynamic:      true,
+            arrival_time:   null,    // filled in by OSRM ETA assignment after rerouting
+            departure_time: null,
+            spawnTime:      Math.round(spawnStart + Math.random() * spawnRange),
+        })
+    }
     pool.sort((a, b) => a.spawnTime - b.spawnTime)
     return pool
 }
@@ -160,356 +132,161 @@ function generateDynamicPool(sourceNodes, count) {
 /**
  * useDvrpSimulation
  * ─────────────────
- * @param {Object}   options
- * @param {Array}    options.initialOrders            - 30 static order nodes
- * @param {number}  [options.initialTargetDod=0.20]   - Starting DOD (decimal)
- * @param {number}  [options.simSpeed=SIM_SPEED]      - Virtual speed multiplier
- * @param {Function}[options.onDynamicOrderInjected]
- *   Callback fired when a dynamic order is injected:
- *   (newOrder, updatedQueue, completedNodes) => void
+ * @param {Array}  options.allNodes  – All route nodes sorted by arrival_time.
+ *   Static nodes must have `arrival_time` (HH:MM). Dynamic nodes have
+ *   `spawnTime` (virtual seconds) but no arrival_time — they are never
+ *   auto-completed by the clock; only manually via the UI.
+ * @param {number} [options.simSpeed=10]   – Virtual seconds per tick
+ * @param {number} [options.tickMs=500]    – Real-world tick interval
  */
 export default function useDvrpSimulation({
-    initialOrders = [],
-    initialTargetDod = 0.20,
-    simSpeed = SIM_SPEED,
-    onDynamicOrderInjected = null,
+    allNodes     = [],
+    simSpeed     = VIRTUAL_SECS_PER_TICK,
+    tickMs       = TICK_INTERVAL_MS,
+    externalMaxVT = null,  // component can extend the stop-time after rerouting
 } = {}) {
 
-    // ── 1. DOD STATE ─────────────────────────────────────────────────────────
+    // ── THE ONLY STATE: virtual time + playing flag ───────────────────────────
+    const [currentVirtualTime, setCVT] = useState(0)
+    const [isPlaying, setIsPlaying]    = useState(false)
 
-    /** User-requested DOD (decimal). Drives all other DOD-derived values. */
-    const [targetDod, _setTargetDod] = useState(initialTargetDod)
-
-    /**
-     * Derived from targetDod after rounding D.
-     * Stored in state so components can subscribe to it directly.
-     */
-    const [dynamicOrdersCount, setDynamicOrdersCount] = useState(() =>
-        calculateDynamicOrders(STATIC_COUNT, initialTargetDod)
-    )
-    const [actualDod, setActualDod] = useState(() => {
-        const d = calculateDynamicOrders(STATIC_COUNT, initialTargetDod)
-        return calculateActualDod(STATIC_COUNT, d)
-    })
-
-    /**
-     * Public setter — auto-corrects actualDod and dynamicOrdersCount whenever
-     * the user drags the DOD slider.
-     *
-     * @param {number} value - DOD in decimal [0, 0.99]
-     */
-    const setTargetDod = useCallback((value) => {
-        const clamped = Math.max(0, Math.min(0.99, value))
-        const d       = calculateDynamicOrders(STATIC_COUNT, clamped)
-        const actual  = calculateActualDod(STATIC_COUNT, d)
-        _setTargetDod(clamped)
-        setDynamicOrdersCount(d)
-        setActualDod(actual)
-    }, [])
-
-    // ── 2. ORDER QUEUES ───────────────────────────────────────────────────────
-
-    /** Active route queue — starts full of static orders, gains dynamic ones. */
-    const [currentRouteQueue, setCurrentRouteQueue] = useState(
-        () => initialOrders.map(o => ({ ...o, isDynamic: false }))
-    )
-
-    /** Nodes the courier has finished — locked out of future reroutes. */
-    const [completedNodes, setCompletedNodes] = useState([])
-
-    // ── 3. DYNAMIC ORDER POOL ─────────────────────────────────────────────────
-
-    /**
-     * Pool of pending dynamic orders not yet injected.
-     * Regenerated whenever dynamicOrdersCount changes (e.g. user edits DOD).
-     * Stored in a ref so the interval callback always reads the latest value
-     * without needing to be recreated.
-     */
-    const [dynamicOrdersPool, setDynamicOrdersPool] = useState(() =>
-        generateDynamicPool(initialOrders, calculateDynamicOrders(STATIC_COUNT, initialTargetDod))
-    )
-    const poolRef = useRef(dynamicOrdersPool)
-
-    // Keep poolRef in sync with state (interval reads poolRef, not state)
-    useEffect(() => { poolRef.current = dynamicOrdersPool }, [dynamicOrdersPool])
-
-    /**
-     * Regenerate pool whenever dynamicOrdersCount changes.
-     * Also resets which orders have already been injected.
-     */
-    useEffect(() => {
-        const newPool = generateDynamicPool(initialOrders, dynamicOrdersCount)
-        setDynamicOrdersPool(newPool)
-        poolRef.current = newPool
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [dynamicOrdersCount])
-
-    // ── 4. VIRTUAL CLOCK ─────────────────────────────────────────────────────
-
-    /** Virtual seconds elapsed since simulation start. */
-    const [currentVirtualTime, setCurrentVirtualTime] = useState(0)
-
-    /** Whether the simulation is actively ticking. */
-    const [isRunning, setIsRunning] = useState(false)
-
-    /** Whether the simulation has ended (reached SIM_DURATION or all done). */
-    const [isFinished, setIsFinished] = useState(false)
-
-    /**
-     * Ref-wrapped version of the injection callback.
-     * Storing in a ref means the interval closure always calls the latest
-     * callback without needing to restart the interval when it changes.
-     */
-    const injectionCallbackRef = useRef(onDynamicOrderInjected)
-    useEffect(() => { injectionCallbackRef.current = onDynamicOrderInjected }, [onDynamicOrderInjected])
-
-    /**
-     * Refs for mutable values read inside the interval.
-     * Using refs avoids stale-closure problems without restarting the interval.
-     */
-    const currentRouteQueueRef = useRef(currentRouteQueue)
-    const completedNodesRef    = useRef(completedNodes)
-    const currentVirtualTimeRef = useRef(0)
-
-    useEffect(() => { currentRouteQueueRef.current = currentRouteQueue }, [currentRouteQueue])
-    useEffect(() => { completedNodesRef.current    = completedNodes    }, [completedNodes])
-
-    // ── 5. TICK: INJECTION LOOP ───────────────────────────────────────────────
-
-    const intervalRef = useRef(null)
-
-    /**
-     * The core injection function.
-     * Called every TICK_MS real milliseconds while `isRunning`.
-     * Advances virtual time and checks for orders whose spawnTime has passed.
-     */
-    const tick = useCallback(() => {
-        // Advance virtual clock by (simSpeed × tickDuration_in_secs)
-        const deltaVirtual = simSpeed * (TICK_MS / 1000)
-
-        currentVirtualTimeRef.current += deltaVirtual
-        const newVirtualTime = currentVirtualTimeRef.current
-
-        setCurrentVirtualTime(newVirtualTime)
-
-        // ── Simulation end guard ─────────────────────────────────────────────
-        if (newVirtualTime >= SIM_DURATION_VIRTUAL_SECS) {
-            setIsRunning(false)
-            setIsFinished(true)
-            return
-        }
-
-        // ── Injection check ─────────────────────────────────────────────────
-        // Work on the ref (not React state) so we get the latest pool without
-        // triggering a re-render loop.
-        const remainingPool = []
-        const justInjected  = []
-
-        for (const order of poolRef.current) {
-            if (!order.injected && order.spawnTime <= newVirtualTime) {
-                // Mark injected so it won't be processed again
-                justInjected.push({ ...order, injected: true })
-            } else {
-                remainingPool.push(order)
+    // ── Max virtual time = last node's arrival_time converted to virtual secs ──
+    // externalMaxVT lets the component extend this when OSRM adds new nodes.
+    const maxVirtualTime = useMemo(() => {
+        let max = 0
+        for (const n of allNodes) {
+            const arr = parseTimeSec(n.arrival_time)
+            if (!isNaN(arr)) {
+                const vt = arr - SIM_OFFSET_SECS
+                if (vt > max) max = vt
             }
         }
+        return max > 0 ? max : SIM_DURATION_FALLBACK
+    }, [allNodes])
 
-        if (justInjected.length === 0) return
+    // effectiveMaxVT = whichever is larger: static route end OR OSRM-extended end
+    const effectiveMaxVT = Math.max(maxVirtualTime, externalMaxVT ?? 0)
 
-        // ── Flush injected orders into queue ─────────────────────────────────
-        poolRef.current = remainingPool
-        setDynamicOrdersPool(remainingPool)
+    // Stable ref so the interval closure never reads a stale value
+    const maxVtRef = useRef(effectiveMaxVT)
+    useEffect(() => { maxVtRef.current = effectiveMaxVT }, [effectiveMaxVT])
 
-        setCurrentRouteQueue(prevQueue => {
-            const updatedQueue = [...prevQueue, ...justInjected]
-            currentRouteQueueRef.current = updatedQueue
-
-            // Fire the callback for each newly injected order.
-            // The callback receives the order, the full updated queue, and the
-            // snapshot of completed nodes — so the parent can trigger rerouting.
-            if (injectionCallbackRef.current) {
-                for (const order of justInjected) {
-                    injectionCallbackRef.current(
-                        order,
-                        updatedQueue,
-                        completedNodesRef.current
-                    )
+    // ── TICK ─────────────────────────────────────────────────────────────────
+    // Increments currentVirtualTime by simSpeed every tickMs.
+    // Auto-stops when time reaches maxVirtualTime.
+    // Cleanup: clearInterval on every dependency change or unmount.
+    useEffect(() => {
+        if (!isPlaying) return
+        const id = setInterval(() => {
+            setCVT(prev => {
+                const next = prev + simSpeed
+                if (next >= maxVtRef.current) {
+                    setIsPlaying(false)
+                    return maxVtRef.current  // clamp at max
                 }
+                return next
+            })
+        }, tickMs)
+        return () => clearInterval(id)   // ← always cleaned up
+    }, [isPlaying, simSpeed, tickMs])
+
+    // ── WALL-CLOCK SECONDS (derived scalar) ───────────────────────────────────
+    const wallClockSec = SIM_OFFSET_SECS + Math.floor(currentVirtualTime)
+
+    // ── PURE DERIVED NODE STATE ───────────────────────────────────────────────
+    //
+    //  spawnedNodes  — static nodes + dynamic nodes whose spawnTime has passed
+    //  completedNodes — spawnedNodes where wallClockSec >= parseTimeSec(arrival_time)
+    //  pendingNodes  — spawnedNodes not yet completed (or no arrival_time)
+    //  nextStop      — pendingNodes[0]  (first pending node)
+    //  prevNode      — completedNodes[last]  (last completed node)
+    //
+    // INVARIANT: no arrays are mutated. Rewinding the slider changes
+    // wallClockSec → all of these re-derive correctly on the next render.
+    //
+    const derived = useMemo(() => {
+        const spawned   = allNodes.filter(n =>
+            !n.isDynamic || currentVirtualTime >= (n.spawnTime ?? 0)
+        )
+        const completed = []
+        const pending   = []
+        for (const n of spawned) {
+            const arr = parseTimeSec(n.arrival_time)
+            if (!isNaN(arr) && wallClockSec >= arr) {
+                completed.push(n)
+            } else {
+                pending.push(n)
             }
-
-            return updatedQueue
-        })
-    }, [simSpeed])
-
-    /** Start/stop the interval based on `isRunning`. */
-    useEffect(() => {
-        if (isRunning && !isFinished) {
-            intervalRef.current = setInterval(tick, TICK_MS)
-        } else {
-            clearInterval(intervalRef.current)
         }
-        return () => clearInterval(intervalRef.current)
-    }, [isRunning, isFinished, tick])
+        return {
+            spawnedNodes:   spawned,
+            completedNodes: completed,
+            pendingNodes:   pending,
+            nextStop:  pending[0]                     ?? null,
+            prevNode:  completed[completed.length - 1] ?? null,
+        }
+    }, [allNodes, currentVirtualTime, wallClockSec])
 
-    // ── 6. CONTROLS ───────────────────────────────────────────────────────────
+    // ── CONTROLS ──────────────────────────────────────────────────────────────
 
-    /** Start the virtual clock. No-op if already finished. */
-    const play = useCallback(() => {
-        if (!isFinished) setIsRunning(true)
-    }, [isFinished])
-
-    /** Pause the virtual clock (preserves all state). */
-    const pause = useCallback(() => {
-        setIsRunning(false)
-    }, [])
-
-    /**
-     * Reset everything back to initial conditions.
-     * Regenerates the dynamic pool with the current DOD settings.
-     */
+    const play  = useCallback(() => setIsPlaying(true), [])
+    const pause = useCallback(() => setIsPlaying(false), [])
     const reset = useCallback(() => {
-        setIsRunning(false)
-        setIsFinished(false)
-        setCurrentVirtualTime(0)
-        currentVirtualTimeRef.current = 0
-
-        const freshQueue = initialOrders.map(o => ({ ...o, isDynamic: false }))
-        setCurrentRouteQueue(freshQueue)
-        currentRouteQueueRef.current = freshQueue
-
-        setCompletedNodes([])
-        completedNodesRef.current = []
-
-        const freshPool = generateDynamicPool(initialOrders, dynamicOrdersCount)
-        setDynamicOrdersPool(freshPool)
-        poolRef.current = freshPool
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [initialOrders, dynamicOrdersCount])
-
-    // ── 7. NODE COMPLETION ────────────────────────────────────────────────────
-
-    /**
-     * markNodeAsCompleted
-     * ───────────────────
-     * Removes `nodeId` from `currentRouteQueue` and appends it to
-     * `completedNodes`. Completed nodes are excluded from future reroutes.
-     *
-     * @param {string} nodeId - The `id` of the order/node to mark done
-     */
-    const markNodeAsCompleted = useCallback((nodeId) => {
-        // Read current queues from refs (always latest, no stale-closure risk)
-        const prevQueue  = currentRouteQueueRef.current
-        const node       = prevQueue.find(n => n.id === nodeId)
-        const newQueue   = prevQueue.filter(n => n.id !== nodeId)
-
-        // Update refs immediately so any in-flight async reads see latest values
-        currentRouteQueueRef.current = newQueue
-
-        // Apply both state updates sequentially at the top level — React will
-        // batch these in React 18. Calling setState inside another setState's
-        // updater function is illegal (triggers the "state during render" warning).
-        setCurrentRouteQueue(newQueue)
-
-        if (node) {
-            const newCompleted = [
-                ...completedNodesRef.current,
-                { ...node, completedAt: currentVirtualTimeRef.current },
-            ]
-            completedNodesRef.current = newCompleted
-            setCompletedNodes(newCompleted)
-        }
+        setIsPlaying(false)
+        setCVT(0)
     }, [])
 
     /**
-     * reorderQueue
-     * ────────────
-     * Replaces the pending section of currentRouteQueue with the caller-supplied
-     * ordering. Used by CourierMobileView after an OSRM /trip reroute to apply
-     * the TSP-optimised sequence.
-     *
-     * Rules:
-     *  • Completed nodes are NEVER re-inserted (they're locked in completedNodes).
-     *  • orderedNodes must only contain pending (non-completed) nodes.
-     *  • If orderedNodes contains an id that is already completed it is silently
-     *    dropped, so callers don't need to pre-filter.
-     *
-     * @param {Array} orderedNodes - Pending nodes in the new desired sequence
+     * seek — time-scrubber handler.
+     * Immediately pauses the clock and jumps to the requested time.
+     * Clamped to [0, maxVirtualTime]. Safe to call at any time.
      */
-    const reorderQueue = useCallback((orderedNodes) => {
-        setCurrentRouteQueue(() => {
-            // Filter out any node that has already been completed
-            const completedSet = new Set(completedNodesRef.current.map(n => n.id))
-            const filtered = orderedNodes.filter(n => !completedSet.has(n.id))
-            currentRouteQueueRef.current = filtered
-            return filtered
-        })
+    const seek = useCallback((t) => {
+        setIsPlaying(false)
+        setCVT(Math.max(0, Math.min(maxVtRef.current, Number(t))))
     }, [])
 
-    // ── 8. DERIVED / DISPLAY VALUES ─────────────────────────────────────────
+    // ── DISPLAY VALUES ────────────────────────────────────────────────────────
 
-    /**
-     * Human-readable virtual time string "HH:MM:SS".
-     * Simulation starts at virtual 08:00:00.
-     */
     const virtualTimeDisplay = useMemo(() => {
-        const OFFSET_SECS = 8 * 3600  // 08:00:00 start
-        const totalSecs   = Math.floor(currentVirtualTime) + OFFSET_SECS
-        const hh = Math.floor(totalSecs / 3600) % 24
-        const mm = Math.floor((totalSecs % 3600) / 60)
-        const ss = totalSecs % 60
+        const total = Math.floor(currentVirtualTime) + SIM_OFFSET_SECS
+        const hh = Math.floor(total / 3600) % 24
+        const mm = Math.floor((total % 3600) / 60)
+        const ss = total % 60
         return [hh, mm, ss].map(v => String(v).padStart(2, '0')).join(':')
     }, [currentVirtualTime])
 
-    /**
-     * Simulation progress as a percentage of SIM_DURATION.
-     * Useful for a progress bar in the UI.
-     */
-    const simProgressPct = useMemo(() =>
-        Math.min(100, Math.round((currentVirtualTime / SIM_DURATION_VIRTUAL_SECS) * 100))
-    , [currentVirtualTime])
-
-    /**
-     * Count of dynamic orders still waiting in the pool (not yet injected).
-     */
-    const pendingInjectionCount = useMemo(() =>
-        dynamicOrdersPool.filter(o => !o.injected).length
-    , [dynamicOrdersPool])
+    const simProgressPct = effectiveMaxVT > 0
+        ? Math.min(100, Math.round((currentVirtualTime / effectiveMaxVT) * 100))
+        : 0
 
     // ── RETURN API ────────────────────────────────────────────────────────────
 
     return {
-        // ── DOD values ──────────────────────────────────────────────────────
-        staticOrdersCount:  STATIC_COUNT,
-        targetDod,            // User-requested DOD (decimal, e.g. 0.20)
-        actualDod,            // Snapped achievable DOD (decimal, e.g. 0.2174)
-        dynamicOrdersCount,   // D (integer, e.g. 8)
-        setTargetDod,         // (value: 0–0.99) → auto-corrects actualDod + D
+        // ── Node arrays (all derived, never mutated) ──────────────────────
+        allNodes,
+        ...derived,          // spawnedNodes, completedNodes, pendingNodes, nextStop, prevNode
 
-        // ── Order queues ────────────────────────────────────────────────────
-        currentRouteQueue,    // All pending (static + injected dynamic) orders
-        completedNodes,       // Orders the courier has finished
-        dynamicOrdersPool,    // Orders still waiting to be injected
-        pendingInjectionCount,// How many dynamic orders haven't spawned yet
+        // ── Clock ─────────────────────────────────────────────────────────
+        currentVirtualTime,
+        wallClockSec,
+        isPlaying,
+        maxVirtualTime,      // static route end (from staticNodes)
+        effectiveMaxVT,      // ← dynamic: extends when OSRM adds nodes
 
-        // ── Virtual clock ───────────────────────────────────────────────────
-        currentVirtualTime,   // Raw virtual seconds elapsed
-        virtualTimeDisplay,   // "HH:MM:SS" string (offset to 08:00 start)
-        simProgressPct,       // 0–100 progress percentage
-        isRunning,
-        isFinished,
-
-        // ── Controls ────────────────────────────────────────────────────────
+        // ── Controls ──────────────────────────────────────────────────────
         play,
         pause,
         reset,
+        seek,                // (t: number) → pauses + jumps to t
 
-        // ── Node lifecycle ───────────────────────────────────────────────────
-        markNodeAsCompleted,  // (nodeId: string) → void
-        reorderQueue,         // (orderedNodes: Array) → void  — applies TSP sequence
+        // ── Display ───────────────────────────────────────────────────────
+        virtualTimeDisplay,
+        simProgressPct,      // uses effectiveMaxVT
 
-        // ── Constants (useful for UI rendering) ─────────────────────────────
-        SIM_DURATION_VIRTUAL_SECS,
-        SIM_SPEED: simSpeed,
-        TICK_MS,
+        // ── Constants (for consumers) ─────────────────────────────────────
+        SIM_OFFSET_SECS,
+        TICK_INTERVAL_MS,
+        VIRTUAL_SECS_PER_TICK,
     }
 }

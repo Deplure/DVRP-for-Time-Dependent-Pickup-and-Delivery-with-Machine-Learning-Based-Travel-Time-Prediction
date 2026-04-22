@@ -33,7 +33,7 @@ try:
     if not RUN_ID or "PASTE" in RUN_ID:
         raise ValueError("RUN_ID kosong atau belum diisi dengan benar di file .env!")
         
-    MODEL_PATH = f"runs:/{RUN_ID}/model_vrp_tegalsari_gpu"
+    MODEL_PATH = f"runs:/{RUN_ID}/model_vrp_tegalsari_gpu_lengkap"
     model = mlflow.xgboost.load_model(MODEL_PATH)
     print("✅ SUCCESS: Model Machine Learning (XGBoost) BERHASIL dimuat ke memori!")
 except Exception as e:
@@ -347,6 +347,7 @@ def solve_tdvrp_with_look_ahead(nodes_data: List[Dict], start_time_str: str, num
     MAX_ITERATION = 3 
 
     for iteration in range(MAX_ITERATION):
+        print(f"--- Iterasi SA ke- {iteration + 1} ---")
         res = solve_vrp_modular(current_matrix, current_matrix, nodes_data, start_time_str, num_vehicles, vehicle_capacity, cost_rupiah, starts, ends, start_delays)
         
         if res["status"] == "FAILED":
@@ -382,7 +383,10 @@ def solve_tdvrp_with_look_ahead(nodes_data: List[Dict], start_time_str: str, num
                     new_hybrid_matrix[node_idx] = target_matrix[node_idx]
                     matrix_changed = True
                     
-        if not matrix_changed: break
+        if not matrix_changed:
+            print(f"Konvergen pada iterasi ke- {iteration + 1}")
+            break
+        print("Update matriks waktu...")
         current_matrix = new_hybrid_matrix
         
     return best_res_overall
@@ -504,6 +508,19 @@ def optimize_route(req: OptimizeRequest):
         "benchmark_cost_rp": e_bnc["total_rp"], "bench_penalty_rp": e_bnc["penalty_rp"], "bench_late_count": e_bnc["late_count"], 
         "savings_rp": sav
     }
+    
+    # ---------------- LOG TERMINAL ----------------
+    print("\n[HASIL OPTIMASI]")
+    for route in res_ai["routes"]:
+        vid = route["vehicle_id"] - 1 # starts at 0 for display
+        path = " -> ".join([s.get("location_id", "Depot") for s in route["steps"]])
+        print(f"Route for vehicle {vid}: {path}")
+    print(f"Total time: {e_ai['fuel_rp'] // 5} sec")
+    print(f"Late count: {e_ai['late_count']}")
+    if res_bench["status"] == "SUCCESS":
+        print(f"Benchmark late count: {e_bnc['late_count']}")
+    print("--------------------------------\n")
+    # ----------------------------------------------
     # Expose evaluated benchmark routes so the frontend can render a side-by-side comparison map
     res_ai["benchmark_routes"] = [r for r in e_bnc.get("routes", []) if len(r.get("steps", [])) > 2] if res_bench.get("status") == "SUCCESS" else []
     return res_ai
@@ -595,6 +612,17 @@ def dynamic_injection(req: DynamicInjectionRequest):
         eval_bench = {"total_rp": 0, "penalty_rp": 0, "late_count": 0}
         sav = 0
             
+    print("\n[HASIL INJEKSI DINAMIS]")
+    for route in eval_ai["routes"]:
+        vid = route["vehicle_id"] - 1
+        path = " -> ".join([s.get("location_id", "Depot") for s in route["steps"]])
+        print(f"Route for vehicle {vid}: {path}")
+    print(f"Total time: {eval_ai['fuel_rp'] // 5} sec")
+    print(f"Late count: {eval_ai['late_count']}")
+    if len(final_routes_bench) > 0:
+        print(f"Benchmark late count: {eval_bench['late_count']}")
+    print("--------------------------------\n")
+
     return {
         "status": "SUCCESS", "objective_value": eval_ai["total_rp"], "routes": eval_ai["routes"], 
         "metadata": {

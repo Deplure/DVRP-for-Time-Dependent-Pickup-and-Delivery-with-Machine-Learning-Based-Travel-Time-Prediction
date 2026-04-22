@@ -9,7 +9,7 @@ from sklearn.metrics import mean_absolute_error
 from sklearn.preprocessing import LabelEncoder
 
 # 1. Load Dataset Riil
-df = pd.read_csv('dataset_kemacetan_tegalsari_final.csv')
+df = pd.read_csv('dataset_vrp_augmented_Cleaned.csv')
 
 # 2. Preprocessing: Encoding Kolom Kategori
 categorical_cols = ['day_of_week', 'origin_name', 'dest_name', 'weather_main', 'weather_desc']
@@ -28,6 +28,7 @@ y = df['duration_in_traffic_sec']
 X_train, X_valid, y_train, y_valid = train_test_split(X, y, test_size=0.2, random_state=42)
 
 # 4. Setup MLflow
+mlflow.set_tracking_uri("sqlite:///mlflow_tuning_new.db")
 mlflow.set_experiment("XGBoost_VRP_Tegalsari_Tuning")
 
 def objective(trial):

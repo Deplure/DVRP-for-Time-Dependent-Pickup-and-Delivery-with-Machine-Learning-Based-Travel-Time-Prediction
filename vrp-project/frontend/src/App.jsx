@@ -7,12 +7,13 @@ import {
     CheckCircle2, AlertCircle, MapPin, Navigation,
     Activity, ChevronRight, PackageCheck, Package,
     Warehouse, Flag, RefreshCw, Clock, Layers,
-    Plus, X, Settings2, Route, Eye
+    Plus, X, Settings2, Route, Eye,
+    LayoutDashboard, PieChart, Table2, Map as MapIcon
 } from 'lucide-react'
 import CourierMobileView from './CourierMobileView'
 
 // ===================== CONSTANTS =====================
-const API_URL = 'http://localhost:8000/optimize'
+const API_URL = '/api/optimize'
 const OSRM_URL = 'http://localhost:5001'  // port 5001 — port 5000 is taken by MLflow UI
 
 const DEFAULT_NODES = [
@@ -452,7 +453,7 @@ export default function App() {
         setSearchLoading(true)
         setSearchError(null)
         try {
-            const res = await fetch(`http://localhost:8000/search_location?q=${encodeURIComponent(searchQuery.trim())}`)
+            const res = await fetch(`/api/search_location?q=${encodeURIComponent(searchQuery.trim())}`)
             if (!res.ok) {
                 const err = await res.json()
                 throw new Error(err.detail || 'Lokasi tidak ditemukan')
@@ -471,7 +472,7 @@ export default function App() {
     // ---- Fetch saved locations (for chips) ----
     const fetchSavedLocations = async () => {
         try {
-            const res = await fetch('http://localhost:8000/saved_locations')
+            const res = await fetch('/api/saved_locations')
             if (res.ok) setSavedLocations(await res.json())
         } catch (_) { /* server may be offline */ }
     }
@@ -676,7 +677,7 @@ export default function App() {
         }
 
         try {
-            const res = await axios.post('http://localhost:8000/dynamic_injection', payload)
+            const res = await axios.post('/api/dynamic_injection', payload)
             const data = res.data
             setResult(data)
             setStatus('SUCCESS')
@@ -1193,41 +1194,35 @@ export default function App() {
                         <div className="glass-card-solid flex flex-col" style={{ flex: 1, minHeight: '580px' }}>
 
                             {/* ---- TAB HEADER ---- */}
-                            <div className="flex border-b" style={{ borderColor: '#e2e8f0' }}>
-                                <button
-                                    onClick={() => setActiveTab('configuration')}
-                                    className="flex-1 flex items-center justify-center gap-1.5 py-3 text-xs font-bold font-mono tracking-wider transition-all duration-200 relative"
-                                    style={{
-                                        color: activeTab === 'configuration' ? '#6366f1' : '#94a3b8',
-                                        background: activeTab === 'configuration' ? 'rgba(99,102,241,0.05)' : 'transparent',
-                                    }}
-                                >
-                                    <Settings2 size={13} />
-                                    Configuration
-                                    {activeTab === 'configuration' && (
-                                        <div className="absolute bottom-0 left-0 right-0 h-0.5"
-                                            style={{ background: 'linear-gradient(90deg, transparent, #6366f1, transparent)' }} />
-                                    )}
-                                </button>
-
-                                <button
-                                    onClick={() => setActiveTab('manifest')}
-                                    className="flex-1 flex items-center justify-center gap-1.5 py-3 text-xs font-bold font-mono tracking-wider transition-all duration-200 relative"
-                                    style={{
-                                        color: activeTab === 'manifest' ? '#3b82f6' : '#94a3b8',
-                                        background: activeTab === 'manifest' ? 'rgba(59,130,246,0.05)' : 'transparent',
-                                    }}
-                                >
-                                    <Route size={13} />
-                                    Route Manifest
-                                    {result && (
-                                        <span className="ml-1 w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block animate-pulse" />
-                                    )}
-                                    {activeTab === 'manifest' && (
-                                        <div className="absolute bottom-0 left-0 right-0 h-0.5"
-                                            style={{ background: 'linear-gradient(90deg, transparent, #3b82f6, transparent)' }} />
-                                    )}
-                                </button>
+                            <div className="tab-bar-scroll border-b" style={{ borderColor: '#e2e8f0' }}>
+                                {[
+                                    { key: 'configuration', label: 'Config', Icon: Settings2, color: '#6366f1', always: true },
+                                    { key: 'manifest',      label: 'Manifest', Icon: Route,     color: '#3b82f6', always: true },
+                                    { key: 'dashboard',     label: 'Dashboard', Icon: LayoutDashboard, color: '#10b981', always: false },
+                                    { key: 'map',           label: 'Map',       Icon: MapIcon,   color: '#8b5cf6', always: false },
+                                    { key: 'analytics',     label: 'Analytics', Icon: PieChart,  color: '#f59e0b', always: false },
+                                    { key: 'routes',        label: 'Routes',    Icon: Table2,    color: '#06b6d4', always: false },
+                                ].filter(t => t.always || result).map(t => (
+                                    <button
+                                        key={t.key}
+                                        onClick={() => setActiveTab(t.key)}
+                                        className="flex-shrink-0 flex items-center justify-center gap-1.5 py-3 px-3 text-xs font-bold font-mono tracking-wider transition-all duration-200 relative"
+                                        style={{
+                                            color: activeTab === t.key ? t.color : '#94a3b8',
+                                            background: activeTab === t.key ? `${t.color}0d` : 'transparent',
+                                        }}
+                                    >
+                                        <t.Icon size={12} />
+                                        {t.label}
+                                        {t.key === 'manifest' && result && (
+                                            <span className="ml-0.5 w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block animate-pulse" />
+                                        )}
+                                        {activeTab === t.key && (
+                                            <div className="absolute bottom-0 left-0 right-0 h-0.5"
+                                                style={{ background: `linear-gradient(90deg, transparent, ${t.color}, transparent)` }} />
+                                        )}
+                                    </button>
+                                ))}
                             </div>
 
                             {/* ================================================================= */}
@@ -1739,6 +1734,493 @@ export default function App() {
                                     )}
                                 </div>
                             )}
+
+                            {/* ================================================================= */}
+                            {/* ---- TAB: DASHBOARD ---- */}
+                            {/* ================================================================= */}
+                            {activeTab === 'dashboard' && result && (() => {
+                                const meta = result.metadata || {}
+                                const allSteps = (result.routes || []).flatMap(r => r.steps || [])
+                                const deliverySteps = allSteps.filter(s => s.task !== 'START' && s.task !== 'FINISH' && s.location_id !== '0_Depot_Akhir')
+                                const totalDeliveries = deliverySteps.length
+                                const lateDeliveries = deliverySteps.filter(s => s.is_late).length
+                                const onTimeRate = totalDeliveries > 0 ? ((totalDeliveries - lateDeliveries) / totalDeliveries * 100).toFixed(1) : '0.0'
+                                const vehicleCount = result.routes?.length || 0
+                                const avgStopsPerVehicle = vehicleCount > 0 ? (totalDeliveries / vehicleCount).toFixed(1) : '0'
+
+                                // Calculate average delay from steps that have times
+                                const delays = deliverySteps.map(s => {
+                                    if (!s.arrival_time || !s.tw_end_abs) return 0
+                                    return 0 // simplified — we use late count instead
+                                })
+
+                                return (
+                                    <div className="flex flex-col flex-1 overflow-hidden">
+                                        <div className="scroll-panel flex-1 overflow-y-auto px-4 pt-4 pb-4 space-y-4 fade-in-up">
+
+                                            {/* ── Section: Overview KPIs ── */}
+                                            <div className="section-title">
+                                                <LayoutDashboard size={11} className="text-emerald-500" />
+                                                Performance Overview
+                                            </div>
+                                            <div className="grid grid-cols-2 gap-3">
+                                                <div className="dash-kpi">
+                                                    <span className="dash-kpi-value" style={{ color: '#10b981' }}>{onTimeRate}%</span>
+                                                    <span className="dash-kpi-label">On-Time Rate</span>
+                                                    <span className="dash-kpi-sub">{totalDeliveries - lateDeliveries}/{totalDeliveries} deliveries</span>
+                                                </div>
+                                                <div className="dash-kpi">
+                                                    <span className="dash-kpi-value" style={{ color: lateDeliveries > 0 ? '#ef4444' : '#10b981' }}>{lateDeliveries}</span>
+                                                    <span className="dash-kpi-label">Late Deliveries</span>
+                                                    <span className="dash-kpi-sub">{lateDeliveries > 0 ? '⚠ needs attention' : '✓ all on-time'}</span>
+                                                </div>
+                                                <div className="dash-kpi">
+                                                    <span className="dash-kpi-value" style={{ color: '#6366f1' }}>{formatRp(meta.ai_cost_rp)}</span>
+                                                    <span className="dash-kpi-label">AI Total Cost</span>
+                                                    <span className="dash-kpi-sub">⛽ fuel + 🚨 penalty</span>
+                                                </div>
+                                                <div className="dash-kpi">
+                                                    <span className="dash-kpi-value" style={{ color: meta.savings_rp > 0 ? '#10b981' : '#f59e0b' }}>
+                                                        {meta.savings_rp > 0 ? '+' : ''}{formatRp(meta.savings_rp)}
+                                                    </span>
+                                                    <span className="dash-kpi-label">Cost Savings</span>
+                                                    <span className="dash-kpi-sub">vs Standard Routing</span>
+                                                </div>
+                                            </div>
+
+                                            {/* ── Section: Fleet Stats ── */}
+                                            <div className="section-title">
+                                                <Truck size={11} className="text-blue-500" />
+                                                Fleet Utilization
+                                            </div>
+                                            <div className="grid grid-cols-3 gap-2">
+                                                <div className="dash-kpi">
+                                                    <span className="dash-kpi-value" style={{ color: '#3b82f6', fontSize: '1.2rem' }}>{vehicleCount}</span>
+                                                    <span className="dash-kpi-label">Vehicles</span>
+                                                </div>
+                                                <div className="dash-kpi">
+                                                    <span className="dash-kpi-value" style={{ color: '#8b5cf6', fontSize: '1.2rem' }}>{totalDeliveries}</span>
+                                                    <span className="dash-kpi-label">Total Stops</span>
+                                                </div>
+                                                <div className="dash-kpi">
+                                                    <span className="dash-kpi-value" style={{ color: '#06b6d4', fontSize: '1.2rem' }}>{avgStopsPerVehicle}</span>
+                                                    <span className="dash-kpi-label">Avg/Vehicle</span>
+                                                </div>
+                                            </div>
+
+                                            {/* ── Per-Vehicle Summary ── */}
+                                            <div className="section-title">
+                                                <Activity size={11} className="text-indigo-500" />
+                                                Per-Vehicle Breakdown
+                                            </div>
+                                            {result.routes?.map((veh, i) => {
+                                                const col = VEHICLE_COLORS[i % VEHICLE_COLORS.length]
+                                                const vSteps = (veh.steps || []).filter(s => s.task !== 'START' && s.task !== 'FINISH' && s.location_id !== '0_Depot_Akhir')
+                                                const vLate = vSteps.filter(s => s.is_late).length
+                                                const firstETA = vSteps[0]?.arrival_time || '—'
+                                                const lastETA = vSteps[vSteps.length - 1]?.departure_time || vSteps[vSteps.length - 1]?.arrival_time || '—'
+                                                return (
+                                                    <div key={veh.vehicle_id} className="flex items-center gap-3 p-2.5 rounded-lg" style={{ background: `${col}08`, border: `1px solid ${col}25` }}>
+                                                        <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: `${col}18` }}>
+                                                            <Truck size={14} style={{ color: col }} />
+                                                        </div>
+                                                        <div className="flex-1 min-w-0">
+                                                            <div className="flex items-center gap-2">
+                                                                <span className="text-xs font-bold font-mono" style={{ color: col }}>V{i + 1}</span>
+                                                                <span className="text-[10px] font-mono text-slate-400">{vSteps.length} stops</span>
+                                                                {vLate > 0 && <span className="text-[10px] font-bold text-red-500">⚠ {vLate} late</span>}
+                                                                {vLate === 0 && <span className="text-[10px] font-bold text-emerald-500">✓ on-time</span>}
+                                                            </div>
+                                                            <span className="text-[10px] font-mono text-slate-400">{firstETA} → {lastETA}</span>
+                                                        </div>
+                                                    </div>
+                                                )
+                                            })}
+
+                                            {/* ── Weather ── */}
+                                            <div className="section-title">
+                                                <CloudSun size={11} className="text-amber-500" />
+                                                Weather Condition
+                                            </div>
+                                            <div className="dash-kpi" style={{ flexDirection: 'row', justifyContent: 'space-between', padding: '10px 14px' }}>
+                                                <div className="flex items-center gap-2">
+                                                    <WeatherIcon weather={meta.weather} />
+                                                    <span className="text-sm font-bold text-slate-700">{meta.weather || 'N/A'}</span>
+                                                </div>
+                                                <span className={`text-xs font-bold font-mono px-2 py-0.5 rounded-full ${meta.is_rain ? 'bg-sky-100 text-sky-600 border border-sky-200' : 'bg-emerald-100 text-emerald-600 border border-emerald-200'}`}>
+                                                    {meta.is_rain ? '🌧 Rain (+traffic)' : '☀ Clear'}
+                                                </span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )
+                            })()}
+
+                            {/* ================================================================= */}
+                            {/* ---- TAB: MAP ---- */}
+                            {/* ================================================================= */}
+                            {activeTab === 'map' && result && (() => {
+                                const totalSegs = osrmRoads.length
+                                const roadSnapped = osrmRoads.filter(s => !s.isFallback).length
+                                const fallbackSegs = totalSegs - roadSnapped
+                                const benchSegs = osrmBenchRoads.length
+                                const benchSnapped = osrmBenchRoads.filter(s => !s.isFallback).length
+                                return (
+                                    <div className="flex flex-col flex-1 overflow-hidden">
+                                        <div className="scroll-panel flex-1 overflow-y-auto px-4 pt-4 pb-4 space-y-4 fade-in-up">
+
+                                            <div className="section-title">
+                                                <MapIcon size={11} className="text-violet-500" />
+                                                OSRM Road Geometry Status
+                                            </div>
+
+                                            {/* AI Map Stats */}
+                                            <div className="rounded-lg overflow-hidden" style={{ border: '1px solid #e2e8f0' }}>
+                                                <div className="px-3 py-2 flex items-center gap-2" style={{ background: '#f8fafc', borderBottom: '1px solid #e2e8f0' }}>
+                                                    <Brain size={11} className="text-indigo-500" />
+                                                    <span className="text-[10px] font-bold font-mono text-slate-600 tracking-wider">AI OPTIMIZED MAP</span>
+                                                </div>
+                                                <div className="p-3 space-y-2">
+                                                    <div className="flex justify-between text-xs font-mono">
+                                                        <span className="text-slate-500">Total Segments</span>
+                                                        <span className="font-bold text-slate-700">{totalSegs}</span>
+                                                    </div>
+                                                    <div className="flex justify-between text-xs font-mono">
+                                                        <span className="text-slate-500">Road-Snapped ✓</span>
+                                                        <span className="font-bold text-emerald-600">{roadSnapped}</span>
+                                                    </div>
+                                                    <div className="flex justify-between text-xs font-mono">
+                                                        <span className="text-slate-500">Straight-Line Fallback</span>
+                                                        <span className={`font-bold ${fallbackSegs > 0 ? 'text-amber-500' : 'text-emerald-600'}`}>{fallbackSegs}</span>
+                                                    </div>
+                                                    {/* Progress bar */}
+                                                    <div className="bar-chart-track" style={{ height: '10px' }}>
+                                                        <div className="bar-chart-fill" style={{
+                                                            width: totalSegs > 0 ? `${(roadSnapped / totalSegs) * 100}%` : '0%',
+                                                            background: 'linear-gradient(90deg, #10b981, #3b82f6)',
+                                                            fontSize: '8px',
+                                                        }}>{totalSegs > 0 ? `${Math.round((roadSnapped / totalSegs) * 100)}%` : ''}</div>
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            {/* Benchmark Map Stats */}
+                                            <div className="rounded-lg overflow-hidden" style={{ border: '1px solid #e2e8f0' }}>
+                                                <div className="px-3 py-2 flex items-center gap-2" style={{ background: '#f8fafc', borderBottom: '1px solid #e2e8f0' }}>
+                                                    <BarChart3 size={11} className="text-slate-500" />
+                                                    <span className="text-[10px] font-bold font-mono text-slate-600 tracking-wider">BENCHMARK MAP</span>
+                                                </div>
+                                                <div className="p-3 space-y-2">
+                                                    <div className="flex justify-between text-xs font-mono">
+                                                        <span className="text-slate-500">Total Segments</span>
+                                                        <span className="font-bold text-slate-700">{benchSegs}</span>
+                                                    </div>
+                                                    <div className="flex justify-between text-xs font-mono">
+                                                        <span className="text-slate-500">Road-Snapped ✓</span>
+                                                        <span className="font-bold text-emerald-600">{benchSnapped}</span>
+                                                    </div>
+                                                    <div className="bar-chart-track" style={{ height: '10px' }}>
+                                                        <div className="bar-chart-fill" style={{
+                                                            width: benchSegs > 0 ? `${(benchSnapped / benchSegs) * 100}%` : '0%',
+                                                            background: 'linear-gradient(90deg, #64748b, #94a3b8)',
+                                                            fontSize: '8px',
+                                                        }}>{benchSegs > 0 ? `${Math.round((benchSnapped / benchSegs) * 100)}%` : ''}</div>
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            {/* Per-Vehicle Segment Count */}
+                                            <div className="section-title">
+                                                <Route size={11} className="text-blue-500" />
+                                                Segments Per Vehicle
+                                            </div>
+                                            {vehicleIds.map((vid, i) => {
+                                                const col = VEHICLE_COLORS[i % VEHICLE_COLORS.length]
+                                                const vSegs = osrmRoads.filter(s => s.vehicleId === vid)
+                                                const vSnapped = vSegs.filter(s => !s.isFallback).length
+                                                return (
+                                                    <div key={vid} className="flex items-center gap-2 text-xs font-mono">
+                                                        <div className="w-3 h-3 rounded-full" style={{ background: col }} />
+                                                        <span className="text-slate-600 w-8">V{i + 1}</span>
+                                                        <div className="bar-chart-track flex-1" style={{ height: '12px' }}>
+                                                            <div className="bar-chart-fill" style={{
+                                                                width: vSegs.length > 0 ? `${(vSnapped / vSegs.length) * 100}%` : '0%',
+                                                                background: col,
+                                                                fontSize: '8px',
+                                                            }}>{vSnapped}/{vSegs.length}</div>
+                                                        </div>
+                                                    </div>
+                                                )
+                                            })}
+
+                                            {/* OSRM Connection Status */}
+                                            <div className="section-title">
+                                                <Activity size={11} className="text-emerald-500" />
+                                                Connection
+                                            </div>
+                                            <div className="flex items-center gap-2 p-3 rounded-lg" style={{ background: '#f8fafc', border: '1px solid #e2e8f0' }}>
+                                                <div className={`w-2.5 h-2.5 rounded-full ${roadSnapped > 0 ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
+                                                <span className="text-xs font-mono text-slate-600">
+                                                    OSRM: <span className={roadSnapped > 0 ? 'text-emerald-600 font-bold' : 'text-amber-600 font-bold'}>
+                                                        {roadSnapped > 0 ? 'CONNECTED' : 'FALLBACK MODE'}
+                                                    </span>
+                                                </span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )
+                            })()}
+
+                            {/* ================================================================= */}
+                            {/* ---- TAB: ANALYTICS ---- */}
+                            {/* ================================================================= */}
+                            {activeTab === 'analytics' && result && (() => {
+                                const meta = result.metadata || {}
+                                const aiCost = meta.ai_cost_rp || 0
+                                const benchCost = meta.benchmark_cost_rp || 0
+                                const maxCost = Math.max(aiCost, benchCost, 1)
+                                const aiPenalty = meta.ai_penalty_rp || 0
+                                const benchPenalty = meta.bench_penalty_rp || 0
+                                const maxPenalty = Math.max(aiPenalty, benchPenalty, 1)
+                                const aiLate = meta.ai_late_count || 0
+                                const benchLate = meta.bench_late_count || 0
+                                const maxLate = Math.max(aiLate, benchLate, 1)
+
+                                // Per-vehicle on-time rates
+                                const vehicleStats = (result.routes || []).map((veh, i) => {
+                                    const steps = (veh.steps || []).filter(s => s.task !== 'START' && s.task !== 'FINISH' && s.location_id !== '0_Depot_Akhir')
+                                    const late = steps.filter(s => s.is_late).length
+                                    const rate = steps.length > 0 ? ((steps.length - late) / steps.length * 100) : 100
+                                    return { vid: i + 1, stops: steps.length, late, rate: rate.toFixed(0), color: VEHICLE_COLORS[i % VEHICLE_COLORS.length] }
+                                })
+
+                                return (
+                                    <div className="flex flex-col flex-1 overflow-hidden">
+                                        <div className="scroll-panel flex-1 overflow-y-auto px-4 pt-4 pb-4 space-y-5 fade-in-up">
+
+                                            {/* ── Delivery Performance: AI vs Benchmark ── */}
+                                            <div className="section-title">
+                                                <BarChart3 size={11} className="text-indigo-500" />
+                                                Delivery Performance
+                                            </div>
+
+                                            {/* Total Cost comparison */}
+                                            <div>
+                                                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">Total Cost (Rp)</p>
+                                                <div className="bar-chart-row">
+                                                    <span className="bar-chart-label">🤖 AI</span>
+                                                    <div className="bar-chart-track">
+                                                        <div className="bar-chart-fill" style={{ width: `${(aiCost / maxCost) * 100}%`, background: 'linear-gradient(90deg, #6366f1, #8b5cf6)' }} />
+                                                    </div>
+                                                    <span className="bar-chart-value">{formatRp(aiCost)}</span>
+                                                </div>
+                                                <div className="bar-chart-row">
+                                                    <span className="bar-chart-label">📏 Standard</span>
+                                                    <div className="bar-chart-track">
+                                                        <div className="bar-chart-fill" style={{ width: `${(benchCost / maxCost) * 100}%`, background: 'linear-gradient(90deg, #94a3b8, #64748b)' }} />
+                                                    </div>
+                                                    <span className="bar-chart-value">{formatRp(benchCost)}</span>
+                                                </div>
+                                            </div>
+
+                                            {/* Penalty comparison */}
+                                            <div>
+                                                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">Penalty / Denda (Rp)</p>
+                                                <div className="bar-chart-row">
+                                                    <span className="bar-chart-label">🤖 AI</span>
+                                                    <div className="bar-chart-track">
+                                                        <div className="bar-chart-fill" style={{ width: `${(aiPenalty / maxPenalty) * 100}%`, background: aiPenalty > 0 ? 'linear-gradient(90deg, #f59e0b, #ef4444)' : '#10b981' }} />
+                                                    </div>
+                                                    <span className="bar-chart-value">{formatRp(aiPenalty)}</span>
+                                                </div>
+                                                <div className="bar-chart-row">
+                                                    <span className="bar-chart-label">📏 Standard</span>
+                                                    <div className="bar-chart-track">
+                                                        <div className="bar-chart-fill" style={{ width: `${(benchPenalty / maxPenalty) * 100}%`, background: benchPenalty > 0 ? 'linear-gradient(90deg, #f59e0b, #ef4444)' : '#94a3b8' }} />
+                                                    </div>
+                                                    <span className="bar-chart-value">{formatRp(benchPenalty)}</span>
+                                                </div>
+                                            </div>
+
+                                            {/* Late Count comparison */}
+                                            <div>
+                                                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">Late Deliveries</p>
+                                                <div className="bar-chart-row">
+                                                    <span className="bar-chart-label">🤖 AI</span>
+                                                    <div className="bar-chart-track">
+                                                        <div className="bar-chart-fill" style={{ width: `${(aiLate / maxLate) * 100}%`, background: aiLate > 0 ? '#ef4444' : '#10b981' }}>
+                                                            {aiLate}
+                                                        </div>
+                                                    </div>
+                                                    <span className="bar-chart-value" style={{ color: aiLate > 0 ? '#ef4444' : '#10b981' }}>{aiLate} late</span>
+                                                </div>
+                                                <div className="bar-chart-row">
+                                                    <span className="bar-chart-label">📏 Standard</span>
+                                                    <div className="bar-chart-track">
+                                                        <div className="bar-chart-fill" style={{ width: `${(benchLate / maxLate) * 100}%`, background: benchLate > 0 ? '#ef4444' : '#94a3b8' }}>
+                                                            {benchLate}
+                                                        </div>
+                                                    </div>
+                                                    <span className="bar-chart-value" style={{ color: benchLate > 0 ? '#ef4444' : '#64748b' }}>{benchLate} late</span>
+                                                </div>
+                                            </div>
+
+                                            {/* ── Weather Impact Section ── */}
+                                            <div className="section-title">
+                                                <CloudSun size={11} className="text-amber-500" />
+                                                Weather Impact
+                                            </div>
+                                            <div className="p-3 rounded-lg" style={{ background: meta.is_rain ? 'rgba(56,189,248,0.08)' : 'rgba(16,185,129,0.06)', border: `1px solid ${meta.is_rain ? 'rgba(56,189,248,0.25)' : 'rgba(16,185,129,0.2)'}` }}>
+                                                <div className="flex items-center gap-2 mb-2">
+                                                    <WeatherIcon weather={meta.weather} />
+                                                    <span className="text-sm font-bold text-slate-700">{meta.weather || 'Unknown'}</span>
+                                                </div>
+                                                <p className="text-[10px] font-mono text-slate-500 leading-relaxed">
+                                                    {meta.is_rain
+                                                        ? '🌧 Cuaca hujan terdeteksi! Model AI mempertimbangkan tambahan waktu tempuh akibat lalu lintas basah dan visibility rendah. Rute dioptimasi untuk meminimalisir keterlambatan.'
+                                                        : '☀ Cuaca cerah — kondisi ideal untuk pengiriman. Model AI menggunakan estimasi waktu tempuh normal tanpa koreksi cuaca.'}
+                                                </p>
+                                            </div>
+
+                                            {/* ── Time Window Compliance per Vehicle ── */}
+                                            <div className="section-title">
+                                                <CheckCircle2 size={11} className="text-emerald-500" />
+                                                Time Window Compliance
+                                            </div>
+                                            {vehicleStats.map(v => (
+                                                <div key={v.vid} className="bar-chart-row">
+                                                    <span className="bar-chart-label" style={{ width: '30px' }}>V{v.vid}</span>
+                                                    <div className="bar-chart-track">
+                                                        <div className="bar-chart-fill" style={{
+                                                            width: `${v.rate}%`,
+                                                            background: v.rate >= 100 ? '#10b981' : v.rate >= 80 ? '#f59e0b' : '#ef4444',
+                                                        }}>
+                                                            {v.rate}%
+                                                        </div>
+                                                    </div>
+                                                    <span className="bar-chart-value" style={{ width: '50px', color: v.late > 0 ? '#ef4444' : '#10b981' }}>
+                                                        {v.late > 0 ? `${v.late} late` : '✓'}
+                                                    </span>
+                                                </div>
+                                            ))}
+
+                                            {/* ── Winner Summary ── */}
+                                            <div className="p-3 rounded-lg" style={{
+                                                background: meta.savings_rp > 0 ? '#d1fae5' : '#fef9c3',
+                                                border: `1px solid ${meta.savings_rp > 0 ? '#6ee7b7' : '#fde047'}`,
+                                            }}>
+                                                <div className="flex items-center gap-2">
+                                                    <span style={{ fontSize: 16 }}>{meta.savings_rp > 0 ? '🏆' : '⚠️'}</span>
+                                                    <div>
+                                                        <p className="text-xs font-bold font-mono" style={{ color: meta.savings_rp > 0 ? '#065f46' : '#92400e' }}>
+                                                            {meta.savings_rp > 0 ? `AI Menang! Hemat ${formatRp(meta.savings_rp)}` : 'Standard route is comparable'}
+                                                        </p>
+                                                        <p className="text-[10px] font-mono" style={{ color: meta.savings_rp > 0 ? '#047857' : '#a16207' }}>
+                                                            AI: {aiLate} late | Standard: {benchLate} late
+                                                        </p>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )
+                            })()}
+
+                            {/* ================================================================= */}
+                            {/* ---- TAB: ROUTES ---- */}
+                            {/* ================================================================= */}
+                            {activeTab === 'routes' && result && (() => {
+                                // Build flat table rows from all vehicle routes
+                                const tableRows = []
+                                ;(result.routes || []).forEach((veh, vIdx) => {
+                                    const col = VEHICLE_COLORS[vIdx % VEHICLE_COLORS.length]
+                                    ;(veh.steps || []).forEach((step, sIdx) => {
+                                        tableRows.push({
+                                            vid: vIdx + 1,
+                                            color: col,
+                                            order: sIdx + 1,
+                                            location: step.location_id?.replace(/_/g, ' ') || '—',
+                                            task: step.task || '—',
+                                            arrival: step.arrival_time || '—',
+                                            departure: step.departure_time || '—',
+                                            service: step.service_duration_mins ?? 0,
+                                            demand: step.demand ?? 0,
+                                            isLate: step.is_late ?? false,
+                                        })
+                                    })
+                                })
+
+                                return (
+                                    <div className="flex flex-col flex-1 overflow-hidden">
+                                        {/* Title bar */}
+                                        <div className="flex items-center justify-between px-4 pt-3 pb-2">
+                                            <div className="flex items-center gap-2">
+                                                <Table2 size={13} className="text-cyan-500" />
+                                                <span className="text-xs font-bold font-mono text-slate-700 tracking-wider">FLEET SCHEDULE</span>
+                                            </div>
+                                            <span className="text-[10px] font-mono text-slate-400 bg-slate-100 px-2 py-0.5 rounded">
+                                                {tableRows.length} rows · {result.routes?.length || 0} vehicles
+                                            </span>
+                                        </div>
+
+                                        {/* Scrollable table */}
+                                        <div className="scroll-panel flex-1 overflow-auto px-2 pb-4 fade-in-up">
+                                            <table className="schedule-table">
+                                                <thead>
+                                                    <tr>
+                                                        <th>V#</th>
+                                                        <th>#</th>
+                                                        <th>Location</th>
+                                                        <th>Task</th>
+                                                        <th>ETA</th>
+                                                        <th>ETD</th>
+                                                        <th>Svc</th>
+                                                        <th>Status</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {tableRows.map((row, i) => (
+                                                        <tr key={i} className={row.isLate ? 'late-row' : ''}>
+                                                            <td>
+                                                                <span className="inline-flex items-center gap-1">
+                                                                    <span className="w-2 h-2 rounded-full inline-block" style={{ background: row.color }} />
+                                                                    <span style={{ color: row.color, fontWeight: 700 }}>{row.vid}</span>
+                                                                </span>
+                                                            </td>
+                                                            <td style={{ color: '#94a3b8' }}>{row.order}</td>
+                                                            <td style={{ maxWidth: '120px', overflow: 'hidden', textOverflow: 'ellipsis' }} title={row.location}>
+                                                                {row.location}
+                                                            </td>
+                                                            <td>
+                                                                <span className={
+                                                                    row.task === 'PICKUP' ? 'badge-pickup' :
+                                                                    row.task === 'DROP' ? 'badge-drop' :
+                                                                    row.task === 'START' ? 'badge-start' :
+                                                                    row.task === 'FINISH' ? 'badge-finish' : 'badge-standby'
+                                                                } style={{ fontSize: '8px', padding: '1px 5px' }}>
+                                                                    {row.task}
+                                                                </span>
+                                                            </td>
+                                                            <td style={{ color: '#6366f1', fontWeight: 600 }}>{row.arrival}</td>
+                                                            <td style={{ color: '#10b981' }}>{row.departure}</td>
+                                                            <td style={{ color: '#64748b' }}>{row.service > 0 ? `${row.service}m` : '—'}</td>
+                                                            <td>
+                                                                {row.isLate ? (
+                                                                    <span className="text-red-500 font-bold">⚠ LATE</span>
+                                                                ) : row.task === 'START' || row.task === 'FINISH' ? (
+                                                                    <span className="text-slate-300">—</span>
+                                                                ) : (
+                                                                    <span className="text-emerald-500 font-bold">✓</span>
+                                                                )}
+                                                            </td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+                                )
+                            })()}
 
                         </div>
                     </div>
